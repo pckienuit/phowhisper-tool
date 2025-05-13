@@ -50,16 +50,42 @@ transcriber = pipeline(
 
 def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
     """
-    Split audio into optimized chunks and return paths to temporary files.
-    Increased chunk size for better context and reduced processing overhead.
+    Split audio into optimized chunks at silent or very quiet points.
+    Returns paths to temporary files containing the chunks.
     """
     audio = AudioSegment.from_file(audio_path)
-    chunks = make_chunks(audio, chunk_length_ms)
     temp_files = []
     
     print("\nSplitting audio into chunks...")
-    for i, chunk in enumerate(tqdm(chunks, desc="Creating chunks")):
-        if chunk.dBFS > -60:  # Ensure the chunk has audible sound
+    
+    # Calculate frame length for analysis (10ms frames)
+    frame_length = 10
+    frames = make_chunks(audio, frame_length)
+    
+    # Find optimal split points
+    split_points = []
+    current_chunk_start = 0
+    min_silence_threshold = -60  # dBFS threshold for silence
+    min_silence_duration = 500   # Minimum silence duration in ms
+    
+    for i, frame in enumerate(frames):
+        if frame.dBFS <= min_silence_threshold:
+            # Found a silent frame
+            if i - current_chunk_start >= chunk_length_ms / frame_length:
+                # If we've reached minimum chunk length, look for a good split point
+                split_points.append(i * frame_length)
+                current_chunk_start = i
+    
+    # Add the end of the audio as the final split point
+    split_points.append(len(audio))
+    
+    # Create chunks based on split points
+    for i in range(len(split_points) - 1):
+        start = split_points[i]
+        end = split_points[i + 1]
+        chunk = audio[start:end]
+        
+        if chunk.dBFS > min_silence_threshold:  # Only save chunks with audible sound
             temp_file = f"temp_chunk_{i}.wav"
             chunk.export(temp_file, format="wav", parameters=["-ac", "1", "-ar", "16000"])
             temp_files.append(temp_file)
@@ -284,8 +310,8 @@ def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_de
             model = genai.GenerativeModel(
                 model_name='gemini-2.0-flash',
                 generation_config={
-                    "temperature": 1,
-                    "top_p": 0.8,
+                    "temperature": 0.5,  
+                    "top_p": 0.7,                
                     "top_k": 40,
                     "max_output_tokens": 8192,
                 }
@@ -310,7 +336,7 @@ def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_de
 
 6. *Nội dung ôn tập:* Nếu có
 
-Đảm bảo câu trả lời là tiếng việt và chỉ gồm những nội dung được yêu cầu. Không cần câu mở đầu và câu kết thúc.
+Đảm bảo câu trả lời là tiếng việt và chỉ gồm những nội dung được yêu cầu. Không cần câu mở đầu và câu kết thúc. Phần nào có ví dụ từ người nói thì thêm vào để làm rõ khái niệm hoặc vấn đề
 
 Bản ghi âm:
 {transcript_text}"""
