@@ -18,6 +18,11 @@ import yt_dlp
 import google.generativeai as genai
 import time
 from multiprocessing import cpu_count
+import json
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Suppress all warnings
 warnings.filterwarnings('ignore')
@@ -34,8 +39,12 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
+# Load API key from environment variable
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not found in environment variables. Please set it in .env file")
+
 # Configure Gemini API
-GEMINI_API_KEY = "AIzaSyDGzOrar6l7VTm0M-lwnE9qjRGqOfqoBp4"
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Initialize model with optimized settings
