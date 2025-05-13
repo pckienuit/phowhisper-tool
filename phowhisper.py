@@ -17,6 +17,7 @@ import re
 import yt_dlp
 import google.generativeai as genai
 import time
+from multiprocessing import cpu_count
 
 # Suppress all warnings
 warnings.filterwarnings('ignore')
@@ -58,23 +59,28 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
     
     print("\nSplitting audio into chunks...")
     
-    # Calculate frame length for analysis (10ms frames)
-    frame_length = 10
+    # Calculate frame length for analysis (20ms frames for faster processing)
+    frame_length = 20
     frames = make_chunks(audio, frame_length)
     
     # Find optimal split points
     split_points = []
     current_chunk_start = 0
-    min_silence_threshold = -60  # dBFS threshold for silence
-    min_silence_duration = 500   # Minimum silence duration in ms
+    min_silence_threshold = -50  # Increased threshold for better chunking
+    min_silence_duration = 300   # Reduced minimum silence duration for more natural splits
     
-    for i, frame in enumerate(frames):
-        if frame.dBFS <= min_silence_threshold:
-            # Found a silent frame
-            if i - current_chunk_start >= chunk_length_ms / frame_length:
-                # If we've reached minimum chunk length, look for a good split point
-                split_points.append(i * frame_length)
-                current_chunk_start = i
+    # Process frames in batches for better performance
+    batch_size = 50
+    for i in range(0, len(frames), batch_size):
+        batch = frames[i:i + batch_size]
+        batch_dBFS = [frame.dBFS for frame in batch]
+        
+        for j, dBFS in enumerate(batch_dBFS):
+            frame_idx = i + j
+            if dBFS <= min_silence_threshold:
+                if frame_idx - current_chunk_start >= chunk_length_ms / frame_length:
+                    split_points.append(frame_idx * frame_length)
+                    current_chunk_start = frame_idx
     
     # Add the end of the audio as the final split point
     split_points.append(len(audio))
@@ -93,16 +99,31 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
     return temp_files
 
 def process_chunk(chunk_path: str) -> str:
-    """Process a single audio chunk."""
+    """Process a single audio chunk with optimized settings."""
     try:
-        result = transcriber(chunk_path)
+        # Use cached transcriber instance
+        if not hasattr(process_chunk, 'transcriber'):
+            process_chunk.transcriber = pipeline(
+                "automatic-speech-recognition",
+                model="vinai/PhoWhisper-medium",
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                return_timestamps=True,
+                framework="pt",
+                torch_dtype=torch.float16,
+                model_kwargs={
+                    "use_cache": True,
+                    "low_cpu_mem_usage": True
+                }
+            )
+        
+        result = process_chunk.transcriber(chunk_path)
         return result['text']
     except Exception as e:
         print(f"\nError processing chunk {chunk_path}: {str(e)}")
         return ""
 
-def transcribe_audio(audio_path: str, max_workers: int = 4) -> str:
-    """Transcribe audio using parallel processing."""
+def transcribe_audio(audio_path: str, max_workers: int = None) -> str:
+    """Transcribe audio using optimized parallel processing."""
     if not os.path.exists(audio_path):
         return "File not found"
     
@@ -112,7 +133,15 @@ def transcribe_audio(audio_path: str, max_workers: int = 4) -> str:
         transcriptions = []
         
         print("\nTranscribing audio chunks...")
-        # Process chunks in parallel with progress bar
+        
+        # Determine optimal number of workers
+        if max_workers is None:
+            if torch.cuda.is_available():
+                max_workers = torch.cuda.device_count()
+            else:
+                max_workers = min(cpu_count(), 4)  # Limit CPU workers to prevent overload
+        
+        # Process chunks in parallel with optimized settings
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_chunk, temp_file): temp_file 
                       for temp_file in temp_files}
@@ -136,8 +165,8 @@ def transcribe_audio(audio_path: str, max_workers: int = 4) -> str:
         return " ".join(transcriptions).strip()
     else:
         print("\nTranscribing audio...")
-        result = transcriber(audio_path)
-        return result['text']
+        result = process_chunk(audio_path)
+        return result
 
 def extract_audio_from_video(video_path: str, output_folder: str = "audio") -> str:
     """Extract audio from video file using ffmpeg directly."""
@@ -302,22 +331,22 @@ def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio") -> str:
 
 def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_delay=30) -> str:
     """
-    Process transcribed text using Gemini AI to create a structured document.
+    Process transcribed text using Gemini AI with optimized settings.
     """
     for attempt in range(max_retries):
         try:
-            # Initialize Gemini model with correct configuration
+            # Initialize Gemini model with optimized configuration
             model = genai.GenerativeModel(
                 model_name='gemini-2.0-flash',
                 generation_config={
-                    "temperature": 0.5,  
-                    "top_p": 0.7,                
+                    "temperature": 0.5,
+                    "top_p": 0.7,
                     "top_k": 40,
                     "max_output_tokens": 8192,
                 }
             )
             
-            # Create the prompt
+            # Create the prompt with optimized structure
             prompt = f"""Tôi có một bản ghi âm bài giảng và muốn bạn cải thiện nó để tạo ra một tài liệu tham khảo tốt hơn cho sinh viên. Vui lòng thực hiện các bước sau:
 
 1. *Tóm tắt nội dung:* Tạo một bản tóm tắt ngắn gọn nhưng đầy đủ thông tin về các chủ đề chính được đề cập trong bản ghi âm. Bản tóm tắt thể hiện dưới dạng một đoạn văn.
@@ -343,7 +372,7 @@ Bản ghi âm:
 
             print(f"\nProcessing with Gemini AI (Attempt {attempt + 1}/{max_retries})...")
             
-            # Generate response
+            # Generate response with optimized settings
             response = model.generate_content(prompt)
             
             if response.text:
