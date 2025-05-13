@@ -422,12 +422,20 @@ if __name__ == "__main__":
             if audio_path:
                 print("\nTranscribing audio...")
                 output_text = transcribe_audio(audio_path)
+                # Save raw transcript
+                base_name = os.path.splitext(os.path.basename(audio_path))[0]
+                transcript_file = os.path.join(output_folder, f"{base_name}.txt")
+                with open(transcript_file, "w", encoding="utf-8") as f:
+                    f.write(output_text)
+                print(f"\n✓ Raw transcript saved to: {transcript_file}")
+                
                 print("\nProcessing with Gemini AI...")
                 processed_text = process_transcript_with_gemini(output_text)
-                output_file = os.path.join(output_folder, os.path.splitext(os.path.basename(audio_path))[0] + ".txt")
-                with open(output_file, "w", encoding="utf-8") as f:
+                # Save processed output to a separate file
+                processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
+                with open(processed_file, "w", encoding="utf-8") as f:
                     f.write(processed_text)
-                print(f"\n✓ Output saved to: {output_file}")
+                print(f"\n✓ Processed output saved to: {processed_file}")
         else:
             # Process all files in the audio folder
             convert_to_wav(audio_folder)
@@ -443,12 +451,20 @@ if __name__ == "__main__":
                     if audio_path:
                         print("\nTranscribing audio...")
                         output_text = transcribe_audio(audio_path)
-                        print("\nProcessing with Gemini AI...")
+                        # Save raw transcript
+                        base_name = os.path.splitext(os.path.basename(audio_path))[0]
+                        transcript_file = os.path.join(output_folder, f"{base_name}.txt")
+                        with open(transcript_file, "w", encoding="utf-8") as f:
+                            f.write(output_text)
+                        print(f"\n✓ Raw transcript saved to: {transcript_file}")
+                        
+                        print("Processing with Gemini AI...")
                         processed_text = process_transcript_with_gemini(output_text)
-                        output_file = os.path.join(output_folder, os.path.splitext(os.path.basename(audio_path))[0] + ".txt")
-                        with open(output_file, "w", encoding="utf-8") as f:
+                        # Save processed output to a separate file
+                        processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
+                        with open(processed_file, "w", encoding="utf-8") as f:
                             f.write(processed_text)
-                        print(f"\n✓ Output saved to: {output_file}")
+                        print(f"\n✓ Processed output saved to: {processed_file}")
                 else:
                     print("\nNo valid YouTube URL provided. Exiting...")
                     sys.exit(0)
@@ -459,12 +475,20 @@ if __name__ == "__main__":
                     print(f"\nProcessing file: {audio_name}")
                     print("Transcribing audio...")
                     output_text = transcribe_audio(audio_path)
+                    # Save raw transcript
+                    base_name = os.path.splitext(audio_name)[0]
+                    transcript_file = os.path.join(output_folder, f"{base_name}.txt")
+                    with open(transcript_file, "w", encoding="utf-8") as f:
+                        f.write(output_text)
+                    print(f"✓ Raw transcript saved to: {transcript_file}")
+                    
                     print("Processing with Gemini AI...")
                     processed_text = process_transcript_with_gemini(output_text)
-                    output_file = os.path.join(output_folder, os.path.splitext(audio_name)[0] + ".txt")
-                    with open(output_file, "w", encoding="utf-8") as f:
+                    # Save processed output to a separate file
+                    processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
+                    with open(processed_file, "w", encoding="utf-8") as f:
                         f.write(processed_text)
-                    print(f"✓ Output saved to: {output_file}")
+                    print(f"✓ Processed output saved to: {processed_file}")
 
         # Clean up audio files after processing
         cleanup_audio_folder(audio_folder)
