@@ -404,6 +404,23 @@ Bản ghi âm:
     print("\nFalling back to original transcript after all retries failed")
     return transcript_text
 
+def convert_youtube_url(url: str) -> str:
+    """
+    Convert a shortened YouTube URL (youtu.be) to its full format (youtube.com/watch?v=).
+    
+    Args:
+        url (str): The YouTube URL to convert
+        
+    Returns:
+        str: The converted URL in full format
+    """
+    if "youtu.be/" in url:
+        # Extract the video ID from the shortened URL
+        video_id = url.split("youtu.be/")[1]
+        # Convert to full format
+        return f"https://youtube.com/watch?v={video_id}"
+    return url
+
 # Main execution
 if __name__ == "__main__":
     audio_folder = "audio"
@@ -415,8 +432,8 @@ if __name__ == "__main__":
     
     try:
         # Check if YouTube URL is provided as command line argument
-        if len(sys.argv) > 1 and "youtube.com" in sys.argv[1]:
-            youtube_url = sys.argv[1]
+        if len(sys.argv) > 1 and ("youtube.com" in sys.argv[1] or "youtu.be" in sys.argv[1]):
+            youtube_url = convert_youtube_url(sys.argv[1])
             print(f"\nProcessing YouTube URL: {youtube_url}")
             audio_path = download_youtube_audio_ytdlp(youtube_url, audio_folder)
             if audio_path:
@@ -445,7 +462,8 @@ if __name__ == "__main__":
                 print("\nNo WAV files found in the audio folder.")
                 youtube_url = input("\nPlease enter a YouTube URL (or press Enter to exit): ").strip()
                 
-                if youtube_url and "youtube.com" in youtube_url:
+                if youtube_url and ("youtube.com" in youtube_url or "youtu.be" in youtube_url):
+                    youtube_url = convert_youtube_url(youtube_url)
                     print(f"\nProcessing YouTube URL: {youtube_url}")
                     audio_path = download_youtube_audio_ytdlp(youtube_url, audio_folder)
                     if audio_path:
