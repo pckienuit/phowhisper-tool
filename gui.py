@@ -11,6 +11,57 @@ from phowhisper import (
     cleanup_audio_folder
 )
 
+class ResultViewer(tk.Toplevel):
+    def __init__(self, parent, content, title):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("900x700")
+        
+        # Create main frame
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Create text widget with tags for formatting
+        self.text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, width=100, height=40)
+        self.text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Configure tags for formatting
+        self.text.tag_configure("header1", font=("Arial", 16, "bold"), spacing1=10, spacing3=10)
+        self.text.tag_configure("header2", font=("Arial", 14, "bold"), spacing1=8, spacing3=8)
+        self.text.tag_configure("bullet", lmargin1=20, lmargin2=40)
+        self.text.tag_configure("normal", font=("Arial", 10))
+        
+        # Configure grid weights
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(0, weight=1)
+        
+        # Insert content with formatting
+        self.insert_formatted_content(content)
+        
+    def insert_formatted_content(self, content):
+        lines = content.split('\n')
+        for line in lines:
+            line = line.strip()  # Strip whitespace from both ends
+            if line:  # Only process non-empty lines
+                if line.startswith('##'):
+                    # Header 1
+                    self.text.insert(tk.END, line[2:].strip() + '\n', "header1")
+                elif line.startswith('**') and line.endswith('**'):
+                    # Header 2
+                    self.text.insert(tk.END, line[2:-2].strip() + '\n', "header2")
+                elif line.startswith('*'):
+                    # Bullet point
+                    self.text.insert(tk.END, line + '\n', "bullet")
+                else:
+                    # Normal text
+                    self.text.insert(tk.END, line + '\n', "normal")
+            else:
+                self.text.insert(tk.END, '\n')  # Keep empty lines for spacing
+        
+        self.text.config(state=tk.DISABLED)  # Make text read-only
+
 class TranscriptionApp:
     def __init__(self, root):
         self.root = root
@@ -74,6 +125,9 @@ class TranscriptionApp:
         self.output_text.insert(tk.END, message + "\n")
         self.output_text.see(tk.END)
         
+    def show_result(self, content, title):
+        ResultViewer(self.root, content, title)
+        
     def process_url(self):
         url = self.url_entry.get().strip()
         if not url:
@@ -128,6 +182,9 @@ class TranscriptionApp:
             cleanup_audio_folder("audio")
             self.update_progress("Processing completed successfully!")
             
+            # Show result in formatted window
+            self.root.after(0, lambda: self.show_result(processed_text, f"Processed Result - {base_name}"))
+            
         except Exception as e:
             self.update_progress(f"Error: {str(e)}")
             messagebox.showerror("Error", str(e))
@@ -181,6 +238,9 @@ class TranscriptionApp:
             self.update_progress(f"Processed output saved to: {processed_file}")
             
             self.update_progress("Processing completed successfully!")
+            
+            # Show result in formatted window
+            self.root.after(0, lambda: self.show_result(processed_text, f"Processed Result - {base_name}"))
             
         except Exception as e:
             self.update_progress(f"Error: {str(e)}")
