@@ -9,21 +9,23 @@ from phowhisper import (
     download_youtube_audio_ytdlp,
     transcribe_audio,
     process_transcript_with_gemini,
+    ask_gemini_question,
     cleanup_audio_folder
 )
 
 class ResultViewer(tk.Toplevel):
-    def __init__(self, parent, content, title):
+    def __init__(self, parent, content, title, transcript_text=None):
         super().__init__(parent)
         self.title(title)
         self.geometry("900x700")
+        self.transcript_text = transcript_text
         
         # Create main frame
         main_frame = ttk.Frame(self, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Create text widget with tags for formatting
-        self.text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, width=100, height=40)
+        self.text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, width=100, height=30)
         self.text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Configure tags for formatting
@@ -31,6 +33,28 @@ class ResultViewer(tk.Toplevel):
         self.text.tag_configure("header2", font=("Arial", 14, "bold"), spacing1=8, spacing3=8)
         self.text.tag_configure("bullet", lmargin1=20, lmargin2=40)
         self.text.tag_configure("normal", font=("Arial", 10))
+        
+        # Add question section if transcript is available
+        if transcript_text:
+            question_frame = ttk.LabelFrame(main_frame, text="Đặt câu hỏi về bài giảng", padding="5")
+            question_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
+            
+            self.question_entry = ttk.Entry(question_frame, width=70)
+            self.question_entry.grid(row=0, column=0, padx=5, pady=5)
+            
+            ask_button = ttk.Button(question_frame, text="Hỏi", command=self.ask_question)
+            ask_button.grid(row=0, column=1, padx=5, pady=5)
+            
+            # Answer display area
+            answer_frame = ttk.LabelFrame(main_frame, text="Câu trả lời", padding="5")
+            answer_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+            
+            self.answer_text = scrolledtext.ScrolledText(answer_frame, wrap=tk.WORD, width=100, height=10)
+            self.answer_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            
+            # Configure grid weights for answer section
+            answer_frame.columnconfigure(0, weight=1)
+            answer_frame.rowconfigure(0, weight=1)
         
         # Configure grid weights
         self.columnconfigure(0, weight=1)
@@ -63,6 +87,194 @@ class ResultViewer(tk.Toplevel):
         
         self.text.config(state=tk.DISABLED)  # Make text read-only
 
+    def ask_question(self):
+        if not self.transcript_text:
+            messagebox.showerror("Error", "No transcript available for questions")
+            return
+            
+        question = self.question_entry.get().strip()
+        if not question:
+            messagebox.showerror("Error", "Please enter a question")
+            return
+            
+        # Clear previous answer
+        self.answer_text.delete(1.0, tk.END)
+        self.answer_text.insert(tk.END, "Đang xử lý câu hỏi...\n")
+        
+        # Start processing in a separate thread
+        threading.Thread(target=self._ask_question_thread, args=(question,), daemon=True).start()
+        
+    def _ask_question_thread(self, question):
+        try:
+            # Get answer from Gemini
+            answer = ask_gemini_question(self.transcript_text, question)
+            
+            # Update answer text
+            self.answer_text.delete(1.0, tk.END)
+            self.answer_text.insert(tk.END, answer)
+            
+        except Exception as e:
+            self.answer_text.delete(1.0, tk.END)
+            self.answer_text.insert(tk.END, f"Error: {str(e)}")
+            messagebox.showerror("Error", str(e))
+
+class ReprocessWindow(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Reprocess Files")
+        self.geometry("800x600")
+        
+        # Create main frame
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Create listbox frame with checkboxes
+        list_frame = ttk.LabelFrame(main_frame, text="Select Files to Reprocess", padding="5")
+        list_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        
+        # Add selection buttons
+        button_frame = ttk.Frame(list_frame)
+        button_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
+        
+        select_all_button = ttk.Button(button_frame, text="Select All", command=self.select_all)
+        select_all_button.grid(row=0, column=0, padx=5)
+        
+        deselect_all_button = ttk.Button(button_frame, text="Deselect All", command=self.deselect_all)
+        deselect_all_button.grid(row=0, column=1, padx=5)
+        
+        # Create canvas and scrollbar for the list
+        canvas = tk.Canvas(list_frame)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        self.scrollable_frame = ttk.Frame(canvas)
+        
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        scrollbar.grid(row=1, column=1, sticky=(tk.N, tk.S))
+        
+        # Dictionary to store checkboxes
+        self.checkboxes = {}
+        
+        # Load files
+        self.load_files()
+        
+        # Add reprocess button
+        reprocess_button = ttk.Button(main_frame, text="Reprocess Selected Files", command=self.reprocess_files)
+        reprocess_button.grid(row=1, column=0, pady=10)
+        
+        # Progress section
+        progress_frame = ttk.LabelFrame(main_frame, text="Progress", padding="5")
+        progress_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=5)
+        
+        self.progress_var = tk.StringVar(value="Ready")
+        progress_label = ttk.Label(progress_frame, textvariable=self.progress_var)
+        progress_label.grid(row=0, column=0, padx=5, pady=5)
+        
+        self.progress_bar = ttk.Progressbar(progress_frame, mode='determinate')
+        self.progress_bar.grid(row=1, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
+        
+        # Configure grid weights
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(1, weight=1)
+        
+    def load_files(self):
+        self.checkboxes.clear()
+        if not os.path.exists("output"):
+            print("Thư mục output không tồn tại")
+            return
+            
+        print(f"Đang tìm kiếm file trong thư mục: {os.path.abspath('output')}")
+        files = []
+        for file in os.listdir("output"):
+            print(f"Tìm thấy file: {file}")
+            if file.endswith("_processed.txt"):  # Tìm các file đã được xử lý
+                file_path = os.path.join("output", file)
+                print(f"Đã tìm thấy file đã xử lý: {file}")
+                # Get file modification time and size
+                mod_time = os.path.getmtime(file_path)
+                mod_time_str = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
+                size = os.path.getsize(file_path)
+                size_str = f"{size/1024:.1f} KB" if size < 1024*1024 else f"{size/1024/1024:.1f} MB"
+                display_text = f"{file} ({mod_time_str} | {size_str})"
+                files.append((mod_time, display_text, file_path))
+        
+        print(f"Tổng số file đã xử lý: {len(files)}")
+        
+        # Sort files by modification time (newest first)
+        files.sort(reverse=True)
+        
+        # Add files to list with checkboxes
+        for _, display_text, file_path in files:
+            var = tk.BooleanVar(value=False)
+            cb = ttk.Checkbutton(self.scrollable_frame, text=display_text, variable=var, command=lambda p=file_path: self.on_select_file(p))
+            cb.grid(row=len(self.checkboxes), column=0, sticky=tk.W, padx=5, pady=2)
+            self.checkboxes[file_path] = var
+            
+        # Nếu không có file nào, hiển thị thông báo
+        if not files:
+            label = ttk.Label(self.scrollable_frame, text="Chưa có file nào được xử lý")
+            label.grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
+            
+    def select_all(self):
+        for var in self.checkboxes.values():
+            var.set(True)
+            
+    def deselect_all(self):
+        for var in self.checkboxes.values():
+            var.set(False)
+            
+    def reprocess_files(self):
+        selected_files = [path for path, var in self.checkboxes.items() if var.get()]
+        if not selected_files:
+            messagebox.showwarning("Warning", "Please select at least one file to reprocess")
+            return
+            
+        # Start processing in a separate thread
+        threading.Thread(target=self._reprocess_thread, args=(selected_files,), daemon=True).start()
+        
+    def _reprocess_thread(self, files):
+        try:
+            total_files = len(files)
+            self.progress_bar["maximum"] = total_files
+            self.progress_bar["value"] = 0
+            
+            for i, file_path in enumerate(files, 1):
+                self.progress_var.set(f"Processing file {i} of {total_files}: {os.path.basename(file_path)}")
+                
+                # Read the transcript
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    transcript_text = f.read()
+                
+                # Process with Gemini
+                processed_text = process_transcript_with_gemini(transcript_text)
+                
+                # Save processed output
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                processed_file = os.path.join("output", f"{base_name}_processed.txt")
+                with open(processed_file, "w", encoding="utf-8") as f:
+                    f.write(processed_text)
+                
+                self.progress_bar["value"] = i
+                
+            self.progress_var.set("Processing completed successfully!")
+            messagebox.showinfo("Success", "All selected files have been reprocessed")
+            
+        except Exception as e:
+            self.progress_var.set(f"Error: {str(e)}")
+            messagebox.showerror("Error", str(e))
+        finally:
+            self.progress_bar["value"] = 0
+
 class HistoryViewer(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -73,18 +285,38 @@ class HistoryViewer(tk.Toplevel):
         main_frame = ttk.Frame(self, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
-        # Create listbox for files
+        # Create listbox for files with checkboxes
         list_frame = ttk.LabelFrame(main_frame, text="Processed Files", padding="5")
         list_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 5))
         
-        self.file_listbox = tk.Listbox(list_frame, width=40, height=30)
-        self.file_listbox.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        self.file_listbox.bind('<<ListboxSelect>>', self.on_select_file)
+        # Add selection buttons
+        button_frame = ttk.Frame(list_frame)
+        button_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=5)
         
-        # Add scrollbar to listbox
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.file_listbox.yview)
-        scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
-        self.file_listbox.configure(yscrollcommand=scrollbar.set)
+        select_all_button = ttk.Button(button_frame, text="Select All", command=self.select_all)
+        select_all_button.grid(row=0, column=0, padx=5)
+        
+        deselect_all_button = ttk.Button(button_frame, text="Deselect All", command=self.deselect_all)
+        deselect_all_button.grid(row=0, column=1, padx=5)
+        
+        # Create canvas and scrollbar for the list
+        canvas = tk.Canvas(list_frame)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        self.scrollable_frame = ttk.Frame(canvas)
+        
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        scrollbar.grid(row=1, column=1, sticky=(tk.N, tk.S))
+        
+        # Dictionary to store checkboxes
+        self.checkboxes = {}
         
         # Create preview area
         preview_frame = ttk.LabelFrame(main_frame, text="File Preview", padding="5")
@@ -93,13 +325,17 @@ class HistoryViewer(tk.Toplevel):
         self.preview_text = scrolledtext.ScrolledText(preview_frame, wrap=tk.WORD, width=80, height=30)
         self.preview_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
+        # Add reprocess button
+        reprocess_button = ttk.Button(main_frame, text="Reprocess Selected Files", command=self.reprocess_selected)
+        reprocess_button.grid(row=1, column=0, columnspan=2, pady=10)
+        
         # Configure grid weights
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
         main_frame.rowconfigure(0, weight=1)
         list_frame.columnconfigure(0, weight=1)
-        list_frame.rowconfigure(0, weight=1)
+        list_frame.rowconfigure(1, weight=1)
         preview_frame.columnconfigure(0, weight=1)
         preview_frame.rowconfigure(0, weight=1)
         
@@ -109,67 +345,65 @@ class HistoryViewer(tk.Toplevel):
         # Load files
         self.load_files()
         
-    def configure_text_tags(self):
-        # Headings
-        self.preview_text.tag_configure("h1", font=("Arial", 24, "bold"), spacing1=20, spacing3=10)
-        self.preview_text.tag_configure("h2", font=("Arial", 20, "bold"), spacing1=15, spacing3=8)
-        self.preview_text.tag_configure("h3", font=("Arial", 16, "bold"), spacing1=12, spacing3=6)
-        self.preview_text.tag_configure("h4", font=("Arial", 14, "bold"), spacing1=10, spacing3=5)
-        self.preview_text.tag_configure("h5", font=("Arial", 12, "bold"), spacing1=8, spacing3=4)
-        self.preview_text.tag_configure("h6", font=("Arial", 10, "bold"), spacing1=6, spacing3=3)
-        
-        # Text formatting
-        self.preview_text.tag_configure("bold", font=("Arial", 10, "bold"))
-        self.preview_text.tag_configure("italic", font=("Arial", 10, "italic"))
-        self.preview_text.tag_configure("bold_italic", font=("Arial", 10, "bold italic"))
-        self.preview_text.tag_configure("strikethrough", overstrike=1)
-        
-        # Lists
-        self.preview_text.tag_configure("bullet", lmargin1=20, lmargin2=40)
-        self.preview_text.tag_configure("number", lmargin1=20, lmargin2=40)
-        
-        # Blockquote
-        self.preview_text.tag_configure("blockquote", lmargin1=40, lmargin2=60, foreground="gray")
-        
-        # Code
-        self.preview_text.tag_configure("code", font=("Courier", 10), background="#f0f0f0")
-        self.preview_text.tag_configure("code_block", font=("Courier", 10), background="#f0f0f0", spacing1=5, spacing3=5)
-        
-        # Links
-        self.preview_text.tag_configure("link", foreground="blue", underline=1)
-        
-        # Normal text
-        self.preview_text.tag_configure("normal", font=("Arial", 10))
-        
-    def load_files(self):
-        self.file_listbox.delete(0, tk.END)
-        if not os.path.exists("output"):
+    def select_all(self):
+        for var in self.checkboxes.values():
+            var.set(True)
+            
+    def deselect_all(self):
+        for var in self.checkboxes.values():
+            var.set(False)
+            
+    def reprocess_selected(self):
+        selected_files = [path for path, var in self.checkboxes.items() if var.get()]
+        if not selected_files:
+            messagebox.showwarning("Warning", "Please select at least one file to reprocess")
             return
             
+        # Open reprocess window with selected files
+        reprocess_window = ReprocessWindow(self)
+        for file_path in selected_files:
+            if file_path in reprocess_window.checkboxes:
+                reprocess_window.checkboxes[file_path].set(True)
+        
+    def load_files(self):
+        self.checkboxes.clear()
+        if not os.path.exists("output"):
+            print("Thư mục output không tồn tại")
+            return
+            
+        print(f"Đang tìm kiếm file trong thư mục: {os.path.abspath('output')}")
         files = []
         for file in os.listdir("output"):
-            if file.endswith("_processed.txt"):
+            print(f"Tìm thấy file: {file}")
+            if file.endswith("_processed.txt"):  # Tìm các file đã được xử lý
                 file_path = os.path.join("output", file)
-                # Get file modification time
+                print(f"Đã tìm thấy file đã xử lý: {file}")
+                # Get file modification time and size
                 mod_time = os.path.getmtime(file_path)
                 mod_time_str = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
-                files.append((mod_time, file, file_path))
+                size = os.path.getsize(file_path)
+                size_str = f"{size/1024:.1f} KB" if size < 1024*1024 else f"{size/1024/1024:.1f} MB"
+                display_text = f"{file} ({mod_time_str} | {size_str})"
+                files.append((mod_time, display_text, file_path))
+        
+        print(f"Tổng số file đã xử lý: {len(files)}")
         
         # Sort files by modification time (newest first)
         files.sort(reverse=True)
         
-        # Add files to listbox
-        for _, file, _ in files:
-            self.file_listbox.insert(tk.END, file)
+        # Add files to list with checkboxes
+        for _, display_text, file_path in files:
+            var = tk.BooleanVar(value=False)
+            cb = ttk.Checkbutton(self.scrollable_frame, text=display_text, variable=var, command=lambda p=file_path: self.on_select_file(p))
+            cb.grid(row=len(self.checkboxes), column=0, sticky=tk.W, padx=5, pady=2)
+            self.checkboxes[file_path] = var
             
-    def on_select_file(self, event):
-        selection = self.file_listbox.curselection()
-        if not selection:
-            return
+        # Nếu không có file nào, hiển thị thông báo
+        if not files:
+            label = ttk.Label(self.scrollable_frame, text="Chưa có file nào được xử lý")
+            label.grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
             
-        file_name = self.file_listbox.get(selection[0])
-        file_path = os.path.join("output", file_name)
-        
+    def on_select_file(self, file_path):
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -221,11 +455,10 @@ class HistoryViewer(tk.Toplevel):
                     self.preview_text.insert(tk.END, '• ' + text + '\n', "bullet")
                     continue
                 
-                # Handle ordered lists - more robust checking
+                # Handle ordered lists
                 if line and line[0].isdigit():
-                    # Check if there's a period and space after the number
                     dot_pos = line.find('. ')
-                    if dot_pos > 0 and dot_pos < 4:  # Number should be 1-3 digits
+                    if dot_pos > 0 and dot_pos < 4:
                         number = line[:dot_pos]
                         text = line[dot_pos + 2:].strip()
                         self.preview_text.insert(tk.END, f"{number}. {text}\n", "number")
@@ -233,7 +466,6 @@ class HistoryViewer(tk.Toplevel):
                 
                 # Handle inline formatting
                 if line:
-                    # Process bold and italic
                     line = self.process_inline_formatting(line)
                     self.preview_text.insert(tk.END, line + '\n', "normal")
                 else:
@@ -241,7 +473,7 @@ class HistoryViewer(tk.Toplevel):
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load file: {str(e)}")
-            
+
     def process_inline_formatting(self, line):
         # Process bold and italic
         parts = []
@@ -317,6 +549,9 @@ class TranscriptionApp:
         self.root.title("Audio Transcription Tool")
         self.root.geometry("800x600")
         
+        # Create output directory if it doesn't exist
+        os.makedirs("output", exist_ok=True)
+        
         # Create main frame
         main_frame = ttk.Frame(root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
@@ -381,8 +616,8 @@ class TranscriptionApp:
         self.output_text.insert(tk.END, message + "\n")
         self.output_text.see(tk.END)
         
-    def show_result(self, content, title):
-        ResultViewer(self.root, content, title)
+    def show_result(self, content, title, transcript_text=None):
+        ResultViewer(self.root, content, title, transcript_text)
         
     def process_url(self):
         url = self.url_entry.get().strip()
@@ -439,7 +674,7 @@ class TranscriptionApp:
             self.update_progress("Processing completed successfully!")
             
             # Show result in formatted window
-            self.root.after(0, lambda: self.show_result(processed_text, f"Processed Result - {base_name}"))
+            self.root.after(0, lambda: self.show_result(processed_text, f"Processed Result - {base_name}", output_text))
             
         except Exception as e:
             self.update_progress(f"Error: {str(e)}")
@@ -496,7 +731,7 @@ class TranscriptionApp:
             self.update_progress("Processing completed successfully!")
             
             # Show result in formatted window
-            self.root.after(0, lambda: self.show_result(processed_text, f"Processed Result - {base_name}"))
+            self.root.after(0, lambda: self.show_result(processed_text, f"Processed Result - {base_name}", output_text))
             
         except Exception as e:
             self.update_progress(f"Error: {str(e)}")

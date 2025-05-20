@@ -15,14 +15,19 @@ import warnings
 from pytube import YouTube
 import re
 import yt_dlp
+import requests
 import google.generativeai as genai
-import time
-from multiprocessing import cpu_count
-import json
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+# Configure Gemini API
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not found in .env file")
+
+genai.configure(api_key=GEMINI_API_KEY)
 
 # Suppress all warnings
 warnings.filterwarnings('ignore')
@@ -38,14 +43,6 @@ warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=RuntimeWarning)
-
-# Load API key from environment variable
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY not found in environment variables. Please set it in .env file")
-
-# Configure Gemini API
-genai.configure(api_key=GEMINI_API_KEY)
 
 # Initialize model with optimized settings
 transcriber = pipeline(
@@ -63,49 +60,98 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
     Split audio into optimized chunks at silent or very quiet points.
     Returns paths to temporary files containing the chunks.
     """
-    audio = AudioSegment.from_file(audio_path)
-    temp_files = []
-    
-    print("\nSplitting audio into chunks...")
-    
-    # Calculate frame length for analysis (20ms frames for faster processing)
-    frame_length = 20
-    frames = make_chunks(audio, frame_length)
-    
-    # Find optimal split points
-    split_points = []
-    current_chunk_start = 0
-    min_silence_threshold = -50  # Increased threshold for better chunking
-    min_silence_duration = 300   # Reduced minimum silence duration for more natural splits
-    
-    # Process frames in batches for better performance
-    batch_size = 50
-    for i in range(0, len(frames), batch_size):
-        batch = frames[i:i + batch_size]
-        batch_dBFS = [frame.dBFS for frame in batch]
+    try:
+        audio = AudioSegment.from_file(audio_path)
+        temp_files = []
         
-        for j, dBFS in enumerate(batch_dBFS):
-            frame_idx = i + j
-            if dBFS <= min_silence_threshold:
-                if frame_idx - current_chunk_start >= chunk_length_ms / frame_length:
-                    split_points.append(frame_idx * frame_length)
-                    current_chunk_start = frame_idx
-    
-    # Add the end of the audio as the final split point
-    split_points.append(len(audio))
-    
-    # Create chunks based on split points
-    for i in range(len(split_points) - 1):
-        start = split_points[i]
-        end = split_points[i + 1]
-        chunk = audio[start:end]
+        print("\nSplitting audio into chunks...")
         
-        if chunk.dBFS > min_silence_threshold:  # Only save chunks with audible sound
-            temp_file = f"temp_chunk_{i}.wav"
-            chunk.export(temp_file, format="wav", parameters=["-ac", "1", "-ar", "16000"])
+        # Calculate frame length for analysis (20ms frames for faster processing)
+        frame_length = 20
+        frames = make_chunks(audio, frame_length)
+        
+        # Find optimal split points
+        split_points = []
+        current_chunk_start = 0
+        min_silence_threshold = -40  # Adjusted threshold for better chunking
+        min_silence_duration = 500   # Increased minimum silence duration for more reliable splits
+        min_chunk_length = 5000      # Minimum chunk length in milliseconds
+        
+        # Process frames in batches for better performance
+        batch_size = 50
+        for i in range(0, len(frames), batch_size):
+            batch = frames[i:i + batch_size]
+            batch_dBFS = [frame.dBFS for frame in batch]
+            
+            for j, dBFS in enumerate(batch_dBFS):
+                frame_idx = i + j
+                current_time = frame_idx * frame_length
+                
+                # Check if we've reached minimum chunk length and found silence
+                if (current_time - current_chunk_start >= min_chunk_length and 
+                    dBFS <= min_silence_threshold):
+                    # Look ahead to ensure this is a good split point
+                    look_ahead = min(10, len(frames) - frame_idx - 1)
+                    if look_ahead > 0:
+                        next_frames = frames[frame_idx:frame_idx + look_ahead]
+                        next_dBFS = [frame.dBFS for frame in next_frames]
+                        if all(dB <= min_silence_threshold for dB in next_dBFS):
+                            split_points.append(current_time)
+                            current_chunk_start = current_time
+        
+        # Add the end of the audio as the final split point if needed
+        if len(audio) - current_chunk_start >= min_chunk_length:
+            split_points.append(len(audio))
+        
+        # If no good split points found, create chunks of fixed length
+        if not split_points:
+            print("No suitable split points found, using fixed-length chunks...")
+            for i in range(0, len(audio), chunk_length_ms):
+                split_points.append(i)
+            split_points.append(len(audio))
+        
+        # Create chunks based on split points
+        for i in range(len(split_points) - 1):
+            start = split_points[i]
+            end = split_points[i + 1]
+            chunk = audio[start:end]
+            
+            # Only save chunks that are long enough and have audible sound
+            if len(chunk) >= min_chunk_length and chunk.dBFS > min_silence_threshold:
+                temp_file = f"temp_chunk_{i}.wav"
+                chunk.export(
+                    temp_file,
+                    format="wav",
+                    parameters=["-ac", "1", "-ar", "16000"]
+                )
+                temp_files.append(temp_file)
+        
+        if not temp_files:
+            print("Warning: No valid chunks created. Using original audio file.")
+            temp_file = "temp_chunk_0.wav"
+            audio.export(
+                temp_file,
+                format="wav",
+                parameters=["-ac", "1", "-ar", "16000"]
+            )
             temp_files.append(temp_file)
-    
-    return temp_files
+        
+        print(f"Created {len(temp_files)} audio chunks")
+        return temp_files
+        
+    except Exception as e:
+        print(f"\nError splitting audio: {str(e)}")
+        # Fallback: return the original file as a single chunk
+        temp_file = "temp_chunk_0.wav"
+        try:
+            audio.export(
+                temp_file,
+                format="wav",
+                parameters=["-ac", "1", "-ar", "16000"]
+            )
+            return [temp_file]
+        except:
+            raise Exception(f"Failed to process audio file: {str(e)}")
 
 def process_chunk(chunk_path: str) -> str:
     """Process a single audio chunk with optimized settings."""
@@ -136,46 +182,74 @@ def transcribe_audio(audio_path: str, max_workers: int = None) -> str:
     if not os.path.exists(audio_path):
         return "File not found"
     
-    audio = AudioSegment.from_file(audio_path)
-    if len(audio) > 30000:  # If audio is longer than 30 seconds
-        temp_files = split_audio(audio_path)
-        transcriptions = []
+    try:
+        # Validate WAV file format
+        audio = AudioSegment.from_file(audio_path)
         
-        print("\nTranscribing audio chunks...")
-        
-        # Determine optimal number of workers
-        if max_workers is None:
-            if torch.cuda.is_available():
-                max_workers = torch.cuda.device_count()
-            else:
-                max_workers = min(cpu_count(), 4)  # Limit CPU workers to prevent overload
-        
-        # Process chunks in parallel with optimized settings
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(process_chunk, temp_file): temp_file 
-                      for temp_file in temp_files}
+        # Check if audio is valid
+        if len(audio) == 0:
+            return "Error: Empty audio file"
             
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing chunks"):
-                chunk_path = futures[future]
-                try:
-                    text = future.result()
-                    transcriptions.append(text)
-                except Exception as e:
-                    print(f"\nError processing {chunk_path}: {str(e)}")
-                finally:
-                    # Clean up temporary file
-                    if os.path.exists(chunk_path):
-                        os.remove(chunk_path)
+        # Ensure correct audio format
+        if audio.channels != 1 or audio.frame_rate != 16000:
+            print("\nConverting audio to required format (16kHz mono)...")
+            audio = audio.set_frame_rate(16000).set_channels(1)
+            temp_path = "temp_converted.wav"
+            audio.export(temp_path, format="wav", parameters=["-ac", "1", "-ar", "16000"])
+            audio_path = temp_path
         
-        # Clear CUDA cache after processing
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        return " ".join(transcriptions).strip()
-    else:
-        print("\nTranscribing audio...")
-        result = process_chunk(audio_path)
-        return result
+        if len(audio) > 30000:  # If audio is longer than 30 seconds
+            temp_files = split_audio(audio_path)
+            transcriptions = []
+            
+            print("\nTranscribing audio chunks...")
+            
+            # Determine optimal number of workers
+            if max_workers is None:
+                if torch.cuda.is_available():
+                    max_workers = torch.cuda.device_count()
+                else:
+                    max_workers = min(cpu_count(), 4)  # Limit CPU workers to prevent overload
+            
+            # Process chunks in parallel with optimized settings
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(process_chunk, temp_file): temp_file 
+                          for temp_file in temp_files}
+                
+                for future in tqdm(as_completed(futures), total=len(futures), desc="Processing chunks"):
+                    chunk_path = futures[future]
+                    try:
+                        text = future.result()
+                        transcriptions.append(text)
+                    except Exception as e:
+                        print(f"\nError processing {chunk_path}: {str(e)}")
+                    finally:
+                        # Clean up temporary file
+                        if os.path.exists(chunk_path):
+                            os.remove(chunk_path)
+            
+            # Clear CUDA cache after processing
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Clean up temporary converted file if it exists
+            if os.path.exists("temp_converted.wav"):
+                os.remove("temp_converted.wav")
+                
+            return " ".join(transcriptions).strip()
+        else:
+            print("\nTranscribing audio...")
+            result = process_chunk(audio_path)
+            
+            # Clean up temporary converted file if it exists
+            if os.path.exists("temp_converted.wav"):
+                os.remove("temp_converted.wav")
+                
+            return result
+            
+    except Exception as e:
+        print(f"\nError reading audio file: {str(e)}")
+        return f"Error: Could not process audio file - {str(e)}"
 
 def extract_audio_from_video(video_path: str, output_folder: str = "audio") -> str:
     """Extract audio from video file using ffmpeg directly."""
@@ -340,69 +414,118 @@ def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio") -> str:
 
 def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_delay=30) -> str:
     """
-    Process transcribed text using Gemini AI with optimized settings.
+    Process transcribed text using Gemini with streaming output.
     """
+    prompt = f"""Tôi có một bản ghi âm bài giảng và muốn bạn cải thiện nó để tạo ra một tài liệu tham khảo tốt hơn cho sinh viên. Vui lòng thực hiện các bước sau:\n\n1. *Tóm tắt nội dung:* Tạo một bản tóm tắt ngắn gọn nhưng đầy đủ thông tin về các chủ đề chính được đề cập trong bản ghi âm. Bản tóm tắt thể hiện dưới dạng một đoạn văn.\n\n2. *Chỉnh sửa và cấu trúc lại nội dung:*\n   * Loại bỏ các từ đệm, câu nói ấp úng và các phần không liên quan.\n   * Sắp xếp lại thông tin một cách logic, sử dụng tiêu đề và dấu đầu dòng để phân chia các chủ đề.\n   * Diễn giải rõ ràng các khái niệm phức tạp hoặc các đoạn khó hiểu.\n   * Đảm bảo văn phong trang trọng, phù hợp với tài liệu học thuật. Không chứa phần liệt kê các điểm chính.\n\n3. *Liệt kê các điểm chính:* Tạo một danh sách các điểm chính hoặc các khái niệm quan trọng mà sinh viên cần ghi nhớ.\n\n4. *Liệt kê các dặn dò:* Nếu trong quá trình giảng dạy người nói có dặn dò gì thì liệt kê ra\n\n5. *Các câu hỏi:* Nếu trong quá trình giảng dạy người nói có đặt câu hỏi gì thì liệt kê ra, đồng thời trả lời cho câu trả lời đó, ưu tiên trả lời theo gợi ý người nói\n\n6. *Nội dung ôn tập:* Nếu có\n\nĐảm bảo câu trả lời là tiếng việt và chỉ gồm những nội dung được yêu cầu. Không cần câu mở đầu và câu kết thúc. Phần nào có ví dụ từ người nói thì thêm vào để làm rõ khái niệm hoặc vấn đề\n\nBản ghi âm:\n{transcript_text}"""
+
     for attempt in range(max_retries):
+        print(f"\nProcessing with Gemini (Attempt {attempt + 1}/{max_retries})...\n")
         try:
-            # Initialize Gemini model with optimized configuration
+            # Initialize Gemini model with generation config
+            generation_config = {
+                "temperature": 0.5,  # Controls randomness: 0.0 is deterministic, 1.0 is creative
+                "top_p": 0.7,      # Nucleus sampling: higher values allow more diverse outputs
+                "top_k": 40,        # Top-k sampling: higher values allow more diverse outputs
+                "max_output_tokens": 128000,  # Maximum length of the generated text
+            }
+            
             model = genai.GenerativeModel(
-                model_name='gemini-2.0-flash',
-                generation_config={
-                    "temperature": 0.5,
-                    "top_p": 0.7,
-                    "top_k": 40,
-                    "max_output_tokens": 8192,
-                }
+                model_name='gemini-2.5-flash-preview-04-17',
+                generation_config=generation_config
             )
             
-            # Create the prompt with optimized structure
-            prompt = f"""Tôi có một bản ghi âm bài giảng và muốn bạn cải thiện nó để tạo ra một tài liệu tham khảo tốt hơn cho sinh viên. Vui lòng thực hiện các bước sau:
-
-1. *Tóm tắt nội dung:* Tạo một bản tóm tắt ngắn gọn nhưng đầy đủ thông tin về các chủ đề chính được đề cập trong bản ghi âm. Bản tóm tắt thể hiện dưới dạng một đoạn văn.
-
-2. *Chỉnh sửa và cấu trúc lại nội dung:*
-   * Loại bỏ các từ đệm, câu nói ấp úng và các phần không liên quan.
-   * Sắp xếp lại thông tin một cách logic, sử dụng tiêu đề và dấu đầu dòng để phân chia các chủ đề.
-   * Diễn giải rõ ràng các khái niệm phức tạp hoặc các đoạn khó hiểu.
-   * Đảm bảo văn phong trang trọng, phù hợp với tài liệu học thuật. Không chứa phần liệt kê các điểm chính.
-
-3. *Liệt kê các điểm chính:* Tạo một danh sách các điểm chính hoặc các khái niệm quan trọng mà sinh viên cần ghi nhớ.
-
-4. *Liệt kê các dặn dò:* Nếu trong quá trình giảng dạy người nói có dặn dò gì thì liệt kê ra
-
-5. *Các câu hỏi:* Nếu trong quá trình giảng dạy người nói có đặt câu hỏi gì thì liệt kê ra, đồng thời trả lời cho câu trả lời đó, ưu tiên trả lời theo gợi ý người nói
-
-6. *Nội dung ôn tập:* Nếu có
-
-Đảm bảo câu trả lời là tiếng việt và chỉ gồm những nội dung được yêu cầu. Không cần câu mở đầu và câu kết thúc. Phần nào có ví dụ từ người nói thì thêm vào để làm rõ khái niệm hoặc vấn đề
-
-Bản ghi âm:
-{transcript_text}"""
-
-            print(f"\nProcessing with Gemini AI (Attempt {attempt + 1}/{max_retries})...")
+            # Generate response with streaming
+            response = model.generate_content(prompt, stream=True)
             
-            # Generate response with optimized settings
-            response = model.generate_content(prompt)
+            full_response = ""
+            for chunk in response:
+                if chunk.text:
+                    print(chunk.text, end="", flush=True)
+                    full_response += chunk.text
             
-            if response.text:
-                print("\n✓ Gemini AI processing completed successfully!")
-                return response.text
+            if full_response:
+                print("\n\n✓ Gemini processing completed successfully!\n")
+                return full_response
             else:
-                print("\nWarning: Empty response from Gemini API")
-                if attempt < max_retries - 1:
-                    print(f"Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-                continue
+                print("\nEmpty response from Gemini")
                 
         except Exception as e:
-            print(f"\nError processing transcript with Gemini: {str(e)}")
+            print(f"\nError from Gemini: {str(e)}")
             if attempt < max_retries - 1:
                 print(f"Retrying in {retry_delay} seconds...")
+                import time
                 time.sleep(retry_delay)
-            continue
     
     print("\nFalling back to original transcript after all retries failed")
     return transcript_text
+
+def ask_gemini_question(transcript_text: str, question: str, max_retries=3, retry_delay=30) -> str:
+    """
+    Ask a question about the transcript using Gemini.
+    
+    Args:
+        transcript_text (str): The transcript text to ask questions about
+        question (str): The question to ask
+        max_retries (int): Maximum number of retry attempts
+        retry_delay (int): Delay between retries in seconds
+        
+    Returns:
+        str: Gemini's response to the question
+    """
+    prompt = f"""Dựa trên bản ghi âm bài giảng sau, hãy trả lời câu hỏi của tôi một cách chi tiết và chính xác nhất có thể. Nếu câu trả lời không có trong bản ghi âm, hãy nói rõ điều đó.
+
+Bản ghi âm:
+{transcript_text}
+
+Câu hỏi:
+{question}
+
+Hãy trả lời bằng tiếng Việt và đảm bảo câu trả lời:
+1. Chính xác và dựa trên thông tin từ bản ghi âm
+2. Đầy đủ và chi tiết
+3. Dễ hiểu và có cấu trúc rõ ràng
+4. Nếu có ví dụ từ bản ghi âm, hãy trích dẫn để làm rõ câu trả lời"""
+
+    for attempt in range(max_retries):
+        print(f"\nAsking Gemini (Attempt {attempt + 1}/{max_retries})...\n")
+        try:
+            # Initialize Gemini model with generation config
+            generation_config = {
+                "temperature": 0.5,  # Controls randomness: 0.0 is deterministic, 1.0 is creative
+                "top_p": 0.7,      # Nucleus sampling: higher values allow more diverse outputs
+                "top_k": 40,        # Top-k sampling: higher values allow more diverse outputs
+                "max_output_tokens": 128000,  # Maximum length of the generated text
+            }
+            
+            model = genai.GenerativeModel(
+                model_name='gemini-2.5-flash-preview-04-17',
+                generation_config=generation_config
+            )
+            
+            # Generate response with streaming
+            response = model.generate_content(prompt, stream=True)
+            
+            full_response = ""
+            for chunk in response:
+                if chunk.text:
+                    print(chunk.text, end="", flush=True)
+                    full_response += chunk.text
+            
+            if full_response:
+                print("\n\n✓ Gemini response completed successfully!\n")
+                return full_response
+            else:
+                print("\nEmpty response from Gemini")
+                
+        except Exception as e:
+            print(f"\nError from Gemini: {str(e)}")
+            if attempt < max_retries - 1:
+                print(f"Retrying in {retry_delay} seconds...")
+                import time
+                time.sleep(retry_delay)
+    
+    print("\nFalling back to original transcript after all retries failed")
+    return "Không thể nhận được câu trả lời từ Gemini. Vui lòng thử lại sau."
 
 def convert_youtube_url(url: str) -> str:
     """
@@ -446,7 +569,7 @@ if __name__ == "__main__":
                     f.write(output_text)
                 print(f"\n✓ Raw transcript saved to: {transcript_file}")
                 
-                print("\nProcessing with Gemini AI...")
+                print("\nProcessing with Gemini...")
                 processed_text = process_transcript_with_gemini(output_text)
                 # Save processed output to a separate file
                 processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
@@ -476,7 +599,7 @@ if __name__ == "__main__":
                             f.write(output_text)
                         print(f"\n✓ Raw transcript saved to: {transcript_file}")
                         
-                        print("Processing with Gemini AI...")
+                        print("Processing with Gemini...")
                         processed_text = process_transcript_with_gemini(output_text)
                         # Save processed output to a separate file
                         processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
@@ -500,7 +623,7 @@ if __name__ == "__main__":
                         f.write(output_text)
                     print(f"✓ Raw transcript saved to: {transcript_file}")
                     
-                    print("Processing with Gemini AI...")
+                    print("Processing with Gemini...")
                     processed_text = process_transcript_with_gemini(output_text)
                     # Save processed output to a separate file
                     processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
