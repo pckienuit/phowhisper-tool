@@ -78,7 +78,7 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
         min_chunk_length = 5000      # Minimum chunk length in milliseconds
         
         # Process frames in batches for better performance
-        batch_size = 50
+        batch_size = 100  # Increased batch size for faster processing
         for i in range(0, len(frames), batch_size):
             batch = frames[i:i + batch_size]
             batch_dBFS = [frame.dBFS for frame in batch]
@@ -156,7 +156,7 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
 def process_chunk(chunk_path: str) -> str:
     """Process a single audio chunk with optimized settings."""
     try:
-        # Use cached transcriber instance
+        # Use cached transcriber instance with optimized settings
         if not hasattr(process_chunk, 'transcriber'):
             process_chunk.transcriber = pipeline(
                 "automatic-speech-recognition",
@@ -164,13 +164,23 @@ def process_chunk(chunk_path: str) -> str:
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 return_timestamps=True,
                 framework="pt",
-                torch_dtype=torch.float16,
+                torch_dtype=torch.float16,  # Use half precision for faster processing
                 model_kwargs={
                     "use_cache": True,
                     "low_cpu_mem_usage": True
                 }
             )
+            # Enable model optimization
+            if hasattr(process_chunk.transcriber.model, 'enable_model_cpu_offload'):
+                process_chunk.transcriber.model.enable_model_cpu_offload()
+            
+            # Optimize model for inference
+            if torch.cuda.is_available():
+                process_chunk.transcriber.model = process_chunk.transcriber.model.eval()
+                with torch.cuda.amp.autocast():
+                    process_chunk.transcriber.model = torch.compile(process_chunk.transcriber.model)
         
+        # Process the chunk
         result = process_chunk.transcriber(chunk_path)
         return result['text']
     except Exception as e:
@@ -231,6 +241,7 @@ def transcribe_audio(audio_path: str, max_workers: int = None) -> str:
             # Clear CUDA cache after processing
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                gc.collect()  # Add garbage collection
             
             # Clean up temporary converted file if it exists
             if os.path.exists("temp_converted.wav"):
