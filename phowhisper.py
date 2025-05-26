@@ -62,6 +62,8 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
     """
     try:
         audio = AudioSegment.from_file(audio_path)
+        # Normalize audio volume before splitting
+        audio = normalize_audio(audio)
         temp_files = []
         
         print("\nSplitting audio into chunks...")
@@ -281,32 +283,123 @@ def extract_audio_from_video(video_path: str, output_folder: str = "audio") -> s
         ]
         
         subprocess.run(command, check=True, capture_output=True)
-        print(f"✓ Audio extracted successfully")
+        
+        # Process the extracted audio for volume
+        audio = AudioSegment.from_file(output_path)
+        audio = normalize_audio(audio)
+        audio.export(output_path, format="wav")
+        
+        print(f"✓ Audio extracted and normalized successfully")
         return output_path
     except Exception as e:
         print(f"\nError extracting audio from {video_path}: {str(e)}")
         return None
 
-def convert_to_wav(input_folder: str) -> None:
-    """Convert files to WAV format with optimized settings."""
+def check_and_adjust_volume(audio: AudioSegment, min_dBFS: float = -30.0) -> AudioSegment:
+    """
+    Check if audio volume is too low and adjust it if necessary.
+    
+    Args:
+        audio (AudioSegment): The audio segment to check
+        min_dBFS (float): Minimum acceptable dBFS level (default: -30.0)
+        
+    Returns:
+        AudioSegment: Adjusted audio segment if needed
+    """
+    try:
+        current_dBFS = audio.dBFS
+        if current_dBFS < min_dBFS:
+            print(f"\nAudio volume too low ({current_dBFS:.1f} dBFS). Adjusting to minimum level...")
+            # Calculate how much we need to increase the volume
+            increase_by = min_dBFS - current_dBFS
+            # Apply the increase
+            adjusted_audio = audio.apply_gain(increase_by)
+            print(f"Volume adjusted to {adjusted_audio.dBFS:.1f} dBFS")
+            return adjusted_audio
+        return audio
+    except Exception as e:
+        print(f"\nError checking audio volume: {str(e)}")
+        return audio
+
+def normalize_audio(audio: AudioSegment, target_dBFS: float = -20.0) -> AudioSegment:
+    """
+    Normalize audio to a target dBFS level.
+    
+    Args:
+        audio (AudioSegment): The audio segment to normalize
+        target_dBFS (float): Target dBFS level (default: -20.0, which is a good level for speech)
+        
+    Returns:
+        AudioSegment: Normalized audio segment
+    """
+    try:
+        # First check if volume is too low and adjust if necessary
+        audio = check_and_adjust_volume(audio)
+        
+        # Calculate the difference between current and target dBFS
+        change_in_dBFS = target_dBFS - audio.dBFS
+        
+        # Apply the change
+        normalized_audio = audio.apply_gain(change_in_dBFS)
+        
+        # Ensure the audio doesn't clip
+        if normalized_audio.max_dBFS > 0:
+            # If audio would clip, reduce gain to prevent clipping
+            reduction = normalized_audio.max_dBFS
+            normalized_audio = normalized_audio.apply_gain(-reduction)
+        
+        return normalized_audio
+    except Exception as e:
+        print(f"\nError normalizing audio: {str(e)}")
+        return audio
+
+def convert_to_wav(input_folder: str, output_folder: str) -> list[str]:
+    """
+    Convert files to WAV format with optimized settings.
+    Returns list of files that need processing.
+    """
     files = [f for f in os.listdir(input_folder) if os.path.isfile(os.path.join(input_folder, f))]
     if not files:
         print("\nNo files found in the audio folder.")
-        return
+        return []
 
-    print("\nConverting files to WAV format...")
-    for file_name in tqdm(files, desc="Converting files"):
+    print("\nChecking files for conversion...")
+    files_to_process = []
+    
+    for file_name in tqdm(files, desc="Checking files"):
+        # Check if file has already been processed
+        is_converted, is_transcribed = check_file_status(file_name, output_folder)
+        
+        if is_transcribed:
+            print(f"\nFile {file_name} has already been fully processed.")
+            # Still process the file to allow user interaction
+            audio_path = os.path.join(input_folder, file_name)
+            process_single_file(audio_path, file_name, output_folder)
+            continue
+            
         file_path = os.path.join(input_folder, file_name)
         if file_name.endswith(".mp4"):
-            extract_audio_from_video(file_path)
+            print(f"\nConverting video file: {file_name}")
+            audio_path = extract_audio_from_video(file_path)
+            if audio_path:
+                files_to_process.append(os.path.basename(audio_path))
         elif not file_name.endswith(".wav"):
+            print(f"\nConverting audio file: {file_name}")
             audio = AudioSegment.from_file(file_path)
+            # Normalize audio volume
+            audio = normalize_audio(audio)
             wav_file_path = os.path.splitext(file_path)[0] + ".wav"
             audio.export(
                 wav_file_path,
                 format="wav",
                 parameters=["-ac", "1", "-ar", "16000"]
             )
+            files_to_process.append(os.path.basename(wav_file_path))
+        else:
+            # If it's already a WAV file, just add it to the list
+            files_to_process.append(file_name)
+    
+    return files_to_process
 
 def cleanup_audio_folder(folder_path: str) -> None:
     """Delete all files in the specified audio folder after processing."""
@@ -413,7 +506,13 @@ def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio") -> str:
             wav_files = [f for f in os.listdir(output_folder) if f.endswith('.wav')]
             if wav_files:
                 wav_path = os.path.join(output_folder, wav_files[0])
-                print(f"✓ Audio downloaded and converted successfully: {wav_path}")
+                
+                # Process the downloaded audio for volume
+                audio = AudioSegment.from_file(wav_path)
+                audio = normalize_audio(audio)
+                audio.export(wav_path, format="wav")
+                
+                print(f"✓ Audio downloaded, converted and normalized successfully: {wav_path}")
                 return wav_path
             else:
                 print("Failed to find the downloaded WAV file.")
@@ -423,10 +522,43 @@ def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio") -> str:
         print(f"\nError downloading YouTube audio with yt-dlp: {str(e)}")
         return None
 
+def check_gemini_availability() -> bool:
+    """
+    Check if Gemini API is available and working.
+    
+    Returns:
+        bool: True if Gemini is available and working, False otherwise
+    """
+    try:
+        # Initialize Gemini model with generation config
+        generation_config = {
+            "temperature": 0.5,
+            "top_p": 0.7,
+            "top_k": 40,
+            "max_output_tokens": 128000,
+        }
+        
+        model = genai.GenerativeModel(
+            model_name='gemini-2.5-flash-preview-05-20',
+            generation_config=generation_config
+        )
+        
+        # Try a simple test prompt
+        response = model.generate_content("Test connection")
+        return True
+    except Exception as e:
+        print(f"\nError checking Gemini availability: {str(e)}")
+        return False
+
 def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_delay=30) -> str:
     """
     Process transcribed text using Gemini with streaming output.
     """
+    # Check Gemini availability first
+    if not check_gemini_availability():
+        print("\nGemini API is not available. Using original transcript.")
+        return transcript_text
+
     prompt = f"""Tôi có một bản ghi âm bài giảng và muốn bạn cải thiện nó để tạo ra một tài liệu tham khảo tốt hơn cho sinh viên. Vui lòng thực hiện các bước sau:\n\n1. *Tóm tắt nội dung:* Tạo một bản tóm tắt ngắn gọn nhưng đầy đủ thông tin về các chủ đề chính được đề cập trong bản ghi âm. Bản tóm tắt thể hiện dưới dạng một đoạn văn.\n\n2. *Chỉnh sửa và cấu trúc lại nội dung:*\n   * Loại bỏ các từ đệm, câu nói ấp úng và các phần không liên quan.\n   * Sắp xếp lại thông tin một cách logic, sử dụng tiêu đề và dấu đầu dòng để phân chia các chủ đề.\n   * Diễn giải rõ ràng các khái niệm phức tạp hoặc các đoạn khó hiểu.\n   * Đảm bảo văn phong trang trọng, phù hợp với tài liệu học thuật. Không chứa phần liệt kê các điểm chính.\n\n3. *Liệt kê các điểm chính:* Tạo một danh sách các điểm chính hoặc các khái niệm quan trọng mà sinh viên cần ghi nhớ.\n\n4. *Liệt kê các dặn dò:* Nếu trong quá trình giảng dạy người nói có dặn dò gì thì liệt kê ra\n\n5. *Các câu hỏi:* Nếu trong quá trình giảng dạy người nói có đặt câu hỏi gì thì liệt kê ra, đồng thời trả lời cho câu trả lời đó, ưu tiên trả lời theo gợi ý người nói\n\n6. *Nội dung ôn tập:* Nếu có\n\nĐảm bảo câu trả lời là tiếng việt và chỉ gồm những nội dung được yêu cầu. Không cần câu mở đầu và câu kết thúc. Phần nào có ví dụ từ người nói thì thêm vào để làm rõ khái niệm hoặc vấn đề\n\nBản ghi âm:\n{transcript_text}"""
 
     for attempt in range(max_retries):
@@ -434,14 +566,14 @@ def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_de
         try:
             # Initialize Gemini model with generation config
             generation_config = {
-                "temperature": 0.5,  # Controls randomness: 0.0 is deterministic, 1.0 is creative
-                "top_p": 0.7,      # Nucleus sampling: higher values allow more diverse outputs
-                "top_k": 40,        # Top-k sampling: higher values allow more diverse outputs
-                "max_output_tokens": 128000,  # Maximum length of the generated text
+                "temperature": 0.5,
+                "top_p": 0.7,
+                "top_k": 40,
+                "max_output_tokens": 128000,
             }
             
             model = genai.GenerativeModel(
-                model_name='gemini-2.5-flash-preview-04-17',
+                model_name='gemini-2.5-flash-preview-05-20',
                 generation_config=generation_config
             )
             
@@ -483,6 +615,10 @@ def ask_gemini_question(transcript_text: str, question: str, max_retries=3, retr
     Returns:
         str: Gemini's response to the question
     """
+    # Check Gemini availability first
+    if not check_gemini_availability():
+        return "Gemini API is not available. Please try again later."
+
     prompt = f"""Dựa trên bản ghi âm bài giảng sau, hãy trả lời câu hỏi của tôi một cách chi tiết và chính xác nhất có thể. Nếu câu trả lời không có trong bản ghi âm, hãy nói rõ điều đó.
 
 Bản ghi âm:
@@ -502,14 +638,14 @@ Hãy trả lời bằng tiếng Việt và đảm bảo câu trả lời:
         try:
             # Initialize Gemini model with generation config
             generation_config = {
-                "temperature": 0.5,  # Controls randomness: 0.0 is deterministic, 1.0 is creative
-                "top_p": 0.7,      # Nucleus sampling: higher values allow more diverse outputs
-                "top_k": 40,        # Top-k sampling: higher values allow more diverse outputs
-                "max_output_tokens": 128000,  # Maximum length of the generated text
+                "temperature": 0.5,
+                "top_p": 0.7,
+                "top_k": 40,
+                "max_output_tokens": 128000,
             }
             
             model = genai.GenerativeModel(
-                model_name='gemini-2.5-flash-preview-04-17',
+                model_name='gemini-2.5-flash-preview-05-20',
                 generation_config=generation_config
             )
             
@@ -555,6 +691,133 @@ def convert_youtube_url(url: str) -> str:
         return f"https://youtube.com/watch?v={video_id}"
     return url
 
+def check_file_status(audio_name: str, output_folder: str) -> tuple[bool, bool]:
+    """
+    Check if a file has been converted and transcribed.
+    
+    Args:
+        audio_name (str): Name of the audio file
+        output_folder (str): Path to the output folder
+        
+    Returns:
+        tuple[bool, bool]: (is_converted, is_transcribed)
+    """
+    base_name = os.path.splitext(audio_name)[0]
+    transcript_file = os.path.join(output_folder, f"{base_name}.txt")
+    processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
+    
+    is_converted = os.path.exists(transcript_file)
+    is_transcribed = os.path.exists(processed_file)
+    
+    return is_converted, is_transcribed
+
+def process_single_file(audio_path: str, audio_name: str, output_folder: str) -> None:
+    """
+    Process a single audio file with user interaction.
+    
+    Args:
+        audio_path (str): Path to the audio file
+        audio_name (str): Name of the audio file
+        output_folder (str): Path to the output folder
+    """
+    is_converted, is_transcribed = check_file_status(audio_name, output_folder)
+    
+    if is_transcribed:
+        print(f"\nFile {audio_name} has already been processed.")
+        while True:
+            choice = input("\nDo you want to:\n1. Process again from the beginning\n2. Only reprocess with Gemini\n3. Skip this file\nEnter your choice (1/2/3): ").strip()
+            
+            if choice == "1":
+                print(f"\nProcessing {audio_name} from the beginning...")
+                print("Transcribing audio...")
+                output_text = transcribe_audio(audio_path)
+                # Save raw transcript
+                base_name = os.path.splitext(audio_name)[0]
+                transcript_file = os.path.join(output_folder, f"{base_name}.txt")
+                with open(transcript_file, "w", encoding="utf-8") as f:
+                    f.write(output_text)
+                print(f"✓ Raw transcript saved to: {transcript_file}")
+                
+                print("Processing with Gemini...")
+                processed_text = process_transcript_with_gemini(output_text)
+                # Save processed output
+                processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
+                with open(processed_file, "w", encoding="utf-8") as f:
+                    f.write(processed_text)
+                print(f"✓ Processed output saved to: {processed_file}")
+                break
+                
+            elif choice == "2":
+                print(f"\nReprocessing {audio_name} with Gemini...")
+                # Read existing transcript
+                base_name = os.path.splitext(audio_name)[0]
+                transcript_file = os.path.join(output_folder, f"{base_name}.txt")
+                with open(transcript_file, "r", encoding="utf-8") as f:
+                    output_text = f.read()
+                
+                print("Processing with Gemini...")
+                processed_text = process_transcript_with_gemini(output_text)
+                # Save processed output
+                processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
+                with open(processed_file, "w", encoding="utf-8") as f:
+                    f.write(processed_text)
+                print(f"✓ Processed output saved to: {processed_file}")
+                break
+                
+            elif choice == "3":
+                print(f"\nSkipping {audio_name}")
+                break
+                
+            else:
+                print("\nInvalid choice. Please enter 1, 2, or 3.")
+    
+    elif is_converted:
+        print(f"\nFile {audio_name} has been transcribed but not processed with Gemini.")
+        while True:
+            choice = input("\nDo you want to:\n1. Process with Gemini\n2. Skip this file\nEnter your choice (1/2): ").strip()
+            
+            if choice == "1":
+                print(f"\nProcessing {audio_name} with Gemini...")
+                # Read existing transcript
+                base_name = os.path.splitext(audio_name)[0]
+                transcript_file = os.path.join(output_folder, f"{base_name}.txt")
+                with open(transcript_file, "r", encoding="utf-8") as f:
+                    output_text = f.read()
+                
+                processed_text = process_transcript_with_gemini(output_text)
+                # Save processed output
+                processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
+                with open(processed_file, "w", encoding="utf-8") as f:
+                    f.write(processed_text)
+                print(f"✓ Processed output saved to: {processed_file}")
+                break
+                
+            elif choice == "2":
+                print(f"\nSkipping {audio_name}")
+                break
+                
+            else:
+                print("\nInvalid choice. Please enter 1 or 2.")
+    
+    else:
+        print(f"\nProcessing new file: {audio_name}")
+        print("Transcribing audio...")
+        output_text = transcribe_audio(audio_path)
+        # Save raw transcript
+        base_name = os.path.splitext(audio_name)[0]
+        transcript_file = os.path.join(output_folder, f"{base_name}.txt")
+        with open(transcript_file, "w", encoding="utf-8") as f:
+            f.write(output_text)
+        print(f"✓ Raw transcript saved to: {transcript_file}")
+        
+        print("Processing with Gemini...")
+        processed_text = process_transcript_with_gemini(output_text)
+        # Save processed output
+        processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
+        with open(processed_file, "w", encoding="utf-8") as f:
+            f.write(processed_text)
+        print(f"✓ Processed output saved to: {processed_file}")
+
 # Main execution
 if __name__ == "__main__":
     audio_folder = "audio"
@@ -571,29 +834,14 @@ if __name__ == "__main__":
             print(f"\nProcessing YouTube URL: {youtube_url}")
             audio_path = download_youtube_audio_ytdlp(youtube_url, audio_folder)
             if audio_path:
-                print("\nTranscribing audio...")
-                output_text = transcribe_audio(audio_path)
-                # Save raw transcript
-                base_name = os.path.splitext(os.path.basename(audio_path))[0]
-                transcript_file = os.path.join(output_folder, f"{base_name}.txt")
-                with open(transcript_file, "w", encoding="utf-8") as f:
-                    f.write(output_text)
-                print(f"\n✓ Raw transcript saved to: {transcript_file}")
-                
-                print("\nProcessing with Gemini...")
-                processed_text = process_transcript_with_gemini(output_text)
-                # Save processed output to a separate file
-                processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
-                with open(processed_file, "w", encoding="utf-8") as f:
-                    f.write(processed_text)
-                print(f"\n✓ Processed output saved to: {processed_file}")
+                audio_name = os.path.basename(audio_path)
+                process_single_file(audio_path, audio_name, output_folder)
         else:
             # Process all files in the audio folder
-            convert_to_wav(audio_folder)
-
-            wav_files = [f for f in os.listdir(audio_folder) if f.endswith(".wav")]
+            wav_files = convert_to_wav(audio_folder, output_folder)
+    
             if not wav_files:
-                print("\nNo WAV files found in the audio folder.")
+                print("\nNo new files to process.")
                 youtube_url = input("\nPlease enter a YouTube URL (or press Enter to exit): ").strip()
                 
                 if youtube_url and ("youtube.com" in youtube_url or "youtu.be" in youtube_url):
@@ -601,46 +849,16 @@ if __name__ == "__main__":
                     print(f"\nProcessing YouTube URL: {youtube_url}")
                     audio_path = download_youtube_audio_ytdlp(youtube_url, audio_folder)
                     if audio_path:
-                        print("\nTranscribing audio...")
-                        output_text = transcribe_audio(audio_path)
-                        # Save raw transcript
-                        base_name = os.path.splitext(os.path.basename(audio_path))[0]
-                        transcript_file = os.path.join(output_folder, f"{base_name}.txt")
-                        with open(transcript_file, "w", encoding="utf-8") as f:
-                            f.write(output_text)
-                        print(f"\n✓ Raw transcript saved to: {transcript_file}")
-                        
-                        print("Processing with Gemini...")
-                        processed_text = process_transcript_with_gemini(output_text)
-                        # Save processed output to a separate file
-                        processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
-                        with open(processed_file, "w", encoding="utf-8") as f:
-                            f.write(processed_text)
-                        print(f"\n✓ Processed output saved to: {processed_file}")
+                        audio_name = os.path.basename(audio_path)
+                        process_single_file(audio_path, audio_name, output_folder)
                 else:
                     print("\nNo valid YouTube URL provided. Exiting...")
                     sys.exit(0)
             else:
-                print(f"\nFound {len(wav_files)} WAV files to transcribe.")
-                for audio_name in tqdm(wav_files, desc="Transcribing files"):
+                print(f"\nFound {len(wav_files)} files to process.")
+                for audio_name in wav_files:
                     audio_path = os.path.join(audio_folder, audio_name)
-                    print(f"\nProcessing file: {audio_name}")
-                    print("Transcribing audio...")
-                    output_text = transcribe_audio(audio_path)
-                    # Save raw transcript
-                    base_name = os.path.splitext(audio_name)[0]
-                    transcript_file = os.path.join(output_folder, f"{base_name}.txt")
-                    with open(transcript_file, "w", encoding="utf-8") as f:
-                        f.write(output_text)
-                    print(f"✓ Raw transcript saved to: {transcript_file}")
-                    
-                    print("Processing with Gemini...")
-                    processed_text = process_transcript_with_gemini(output_text)
-                    # Save processed output to a separate file
-                    processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
-                    with open(processed_file, "w", encoding="utf-8") as f:
-                        f.write(processed_text)
-                    print(f"✓ Processed output saved to: {processed_file}")
+                    process_single_file(audio_path, audio_name, output_folder)
 
         # Clean up audio files after processing
         cleanup_audio_folder(audio_folder)

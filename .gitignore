@@ -8,3 +8,5 @@
 /*.wav
 .env
 test*
+*.mkv
+*.mp4
