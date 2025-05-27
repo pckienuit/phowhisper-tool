@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 import random
 from difflib import SequenceMatcher
 import tempfile
+import time
 
 # Load environment variables
 load_dotenv()
@@ -801,7 +802,6 @@ def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_de
             display_info(f"\nError from Gemini: {str(e)}", "error")
             if attempt < max_retries - 1:
                 display_info(f"Retrying in {retry_delay} seconds...", "info")
-                import time
                 time.sleep(retry_delay)
     
     display_info("\nFalling back to original transcript after all retries failed", "warning")
@@ -873,7 +873,6 @@ Hãy trả lời bằng tiếng Việt và đảm bảo câu trả lời:
             display_info(f"\nError from Gemini: {str(e)}", "error")
             if attempt < max_retries - 1:
                 display_info(f"Retrying in {retry_delay} seconds...", "info")
-                import time
                 time.sleep(retry_delay)
     
     display_info("\nFalling back to original transcript after all retries failed", "warning")
@@ -1352,6 +1351,70 @@ def optimize_audio_processing(audio: AudioSegment) -> AudioSegment:
         display_info(f"Error optimizing audio: {str(e)}", "error")
         return audio
 
+def create_temp_audio_file(audio: AudioSegment, prefix: str = "temp", suffix: str = ".wav") -> str:
+    """
+    Create a temporary audio file in the audio folder.
+    
+    Args:
+        audio (AudioSegment): Audio segment to save
+        prefix (str): Prefix for the temporary file
+        suffix (str): File extension
+        
+    Returns:
+        str: Path to the created temporary file
+    """
+    try:
+        # Create a unique filename
+        temp_filename = f"{prefix}_{int(time.time() * 1000)}_{random.randint(1000, 9999)}{suffix}"
+        temp_path = os.path.join("audio", temp_filename)
+        
+        # Save the audio file
+        audio.export(
+            temp_path,
+            format="wav",
+            parameters=["-ac", "1", "-ar", "16000"]
+        )
+        
+        track_temp_files('create', temp_path)
+        return temp_path
+    except Exception as e:
+        display_info(f"Error creating temporary audio file: {str(e)}", "error")
+        return None
+
+def cleanup_audio_files():
+    """
+    Clean up all audio files in the audio folder.
+    """
+    display_info("\nCleaning up audio files...", "info")
+    
+    audio_folder = "audio"
+    if not os.path.exists(audio_folder):
+        return
+        
+    try:
+        # Get list of all files in audio folder
+        files = [f for f in os.listdir(audio_folder) if os.path.isfile(os.path.join(audio_folder, f))]
+        
+        if not files:
+            display_info("No files to clean up in audio folder", "info")
+            return
+            
+        display_info(f"Found {len(files)} files to clean up", "info")
+        
+        # Remove each file
+        for file_name in tqdm(files, desc="Cleaning up files"):
+            file_path = os.path.join(audio_folder, file_name)
+            try:
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                    display_info(f"Removed: {file_name}", "success")
+            except Exception as e:
+                display_info(f"Error removing {file_name}: {str(e)}", "error")
+                
+        display_info("Audio folder cleanup completed", "success")
+    except Exception as e:
+        display_info(f"Error during cleanup: {str(e)}", "error")
+
 def process_audio_chunk(chunk: AudioSegment, chunk_id: int) -> str:
     """
     Process a single audio chunk with optimized settings.
@@ -1367,13 +1430,10 @@ def process_audio_chunk(chunk: AudioSegment, chunk_id: int) -> str:
         # Optimize chunk
         chunk = optimize_audio_processing(chunk)
         
-        # Save to temporary file
-        temp_file = f"temp_chunk_{chunk_id}.wav"
-        chunk.export(
-            temp_file,
-            format="wav",
-            parameters=["-ac", "1", "-ar", "16000"]
-        )
+        # Save to temporary file in audio folder
+        temp_file = create_temp_audio_file(chunk, f"chunk_{chunk_id}")
+        if not temp_file:
+            return ""
         
         # Process chunk
         result = process_chunk(temp_file)
@@ -1381,6 +1441,7 @@ def process_audio_chunk(chunk: AudioSegment, chunk_id: int) -> str:
         # Clean up
         if os.path.exists(temp_file):
             os.remove(temp_file)
+            track_temp_files('process', temp_file)
         
         return result
     except Exception as e:
@@ -1433,16 +1494,17 @@ if __name__ == "__main__":
     audio_folder = "audio"
     output_folder = "output"
     
+    # Create necessary folders
+    os.makedirs(output_folder, exist_ok=True)
+    os.makedirs(audio_folder, exist_ok=True)
+    
     # Optimize system resources
     optimize_memory_usage()
     optimize_model_for_inference()
     
     # Clean up temporary files before starting
     cleanup_temp_files()
-    
-    # Create necessary folders
-    os.makedirs(output_folder, exist_ok=True)
-    os.makedirs(audio_folder, exist_ok=True)
+    cleanup_audio_files()
 
     display_info("\n=== Audio Transcription Process Started ===", "info")
     
@@ -1479,7 +1541,7 @@ if __name__ == "__main__":
                 process_files_parallel(wav_files, audio_folder, output_folder)
 
         # Clean up audio files after processing
-        cleanup_audio_folder(audio_folder)
+        cleanup_audio_files()
         
         # Final cleanup
         gc.collect()
@@ -1491,3 +1553,6 @@ if __name__ == "__main__":
     except Exception as e:
         display_info(f"\nError during processing: {str(e)}", "error")
         display_info("Please check the error message above and try again.", "warning")
+        
+        # Clean up on error
+        cleanup_audio_files()
