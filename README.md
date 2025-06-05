@@ -1,6 +1,6 @@
-# PhoWhisper
+# What the F is this tool?
 
-PhoWhisper is an automatic speech recognition and transcript processing tool, optimized for both GPU and CPU, suitable for batch processing and bash script integration.
+This tool is your intelligent assistant for listening to audio recordings, YouTube videos, lectures, and more. It automatically transcribes speech and summarizes the content into clear, structured notes—making it easy to review, study, or share important information from any audio or video source.
 
 ## Features
 - **Automatic device selection:** Detects and uses GPU if available, otherwise falls back to CPU.
