@@ -798,7 +798,16 @@ def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_de
         display_info("\nGemini API is not available. Using original transcript.", "info")
         return transcript_text
 
-    prompt = f"""Tôi có một bản ghi âm bài giảng và muốn bạn cải thiện nó để tạo ra một tài liệu tham khảo tốt hơn cho sinh viên. Vui lòng thực hiện các bước sau:\n\n1. *Tóm tắt nội dung:* Tạo một bản tóm tắt ngắn gọn nhưng đầy đủ thông tin về các chủ đề chính được đề cập trong bản ghi âm. Bản tóm tắt thể hiện dưới dạng một đoạn văn.\n\n2. *Chỉnh sửa và cấu trúc lại nội dung:*\n   * Loại bỏ các từ đệm, câu nói ấp úng và các phần không liên quan.\n   * Sắp xếp lại thông tin một cách logic, sử dụng tiêu đề và dấu đầu dòng để phân chia các chủ đề.\n   * Diễn giải rõ ràng các khái niệm phức tạp hoặc các đoạn khó hiểu.\n   * Đảm bảo văn phong trang trọng, phù hợp với tài liệu học thuật. Không chứa phần liệt kê các điểm chính.\n\n3. *Liệt kê các điểm chính:* Tạo một danh sách các điểm chính hoặc các khái niệm quan trọng mà sinh viên cần ghi nhớ.\n\n4. *Liệt kê các dặn dò:* Nếu trong quá trình giảng dạy người nói có dặn dò gì thì liệt kê ra\n\n5. *Các câu hỏi:* Nếu trong quá trình giảng dạy người nói có đặt câu hỏi gì thì liệt kê ra, đồng thời trả lời cho câu trả lời đó, ưu tiên trả lời theo gợi ý người nói\n\n6. *Nội dung ôn tập:* Nếu có\n\nĐảm bảo câu trả lời là tiếng việt và chỉ gồm những nội dung được yêu cầu. Không cần câu mở đầu và câu kết thúc. Phần nào có ví dụ từ người nói thì thêm vào để làm rõ khái niệm hoặc vấn đề\n\nBản ghi âm:\n{transcript_text}"""
+    try:
+        # Read the system prompt from file
+        with open("systemprompt", "r", encoding="utf-8") as f:
+            prompt_template = f.read()
+        
+        # Format the prompt with the transcript
+        prompt = f"{prompt_template}\n\nBản ghi âm:\n{transcript_text}"
+    except Exception as e:
+        display_info(f"\nError reading system prompt: {str(e)}", "error")
+        return transcript_text
 
     for attempt in range(max_retries):
         display_info(f"\nProcessing with Gemini (Attempt {attempt + 1}/{max_retries})...\n", "info")

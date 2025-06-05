@@ -4,7 +4,7 @@
 /temp_chunk*
 /output/*.txt
 /audio/*.wav
-/*.txt
+
 /*.wav
 .env
 test*

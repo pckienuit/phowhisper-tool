@@ -1,0 +1,16 @@
+transformers>=4.36.0
+torch>=2.0.0
+pydub>=0.25.1
+numpy>=1.24.0
+tqdm>=4.65.0
+pytube>=15.0.0
+yt-dlp>=2023.12.30
+google-generativeai>=0.3.0
+python-dotenv>=1.0.0
+xformers>=0.0.22
+accelerate>=0.25.0
+einops>=0.7.0
+psutil>=5.9.0
+gputil>=1.4.0
+requests>=2.31.0
+ffmpeg-python>=0.2.0 
