@@ -33,32 +33,6 @@ if not GEMINI_API_KEY:
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Suppress all warnings
-warnings.filterwarnings('ignore')
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-logging.getLogger('tensorflow').setLevel(logging.ERROR)
-logging.getLogger('transformers').setLevel(logging.ERROR)
-logging.getLogger('torch').setLevel(logging.ERROR)
-logging.getLogger('numpy').setLevel(logging.ERROR)
-logging.getLogger('pydub').setLevel(logging.ERROR)
-
-# Suppress specific warnings
-warnings.filterwarnings('ignore', category=UserWarning)
-warnings.filterwarnings('ignore', category=DeprecationWarning)
-warnings.filterwarnings('ignore', category=FutureWarning)
-warnings.filterwarnings('ignore', category=RuntimeWarning)
-
-# Initialize model with optimized settings
-transcriber = pipeline(
-    "automatic-speech-recognition",
-    model="vinai/PhoWhisper-medium",
-    device="cuda",
-    return_timestamps=True,
-    framework="pt",
-    torch_dtype=torch.float16,  # Use half precision for faster processing
-    model_kwargs={"use_cache": True}  # Enable model caching
-)
-
 def display_info(message: str, level: str = "info") -> None:
     """
     Display information directly on screen with different styles.
@@ -75,6 +49,54 @@ def display_info(message: str, level: str = "info") -> None:
         print(f"\n⚠️  {message}")
     elif level == "error":
         print(f"\n❌ {message}")
+
+def select_device() -> str:
+    """
+    Allow user to select between CPU and GPU for processing.
+    Returns the selected device ('cpu' or 'cuda').
+    """
+    if not torch.cuda.is_available():
+        display_info("\nGPU not available. Using CPU for processing.", "warning")
+        return "cpu"
+    
+    while True:
+        choice = input("\nSelect processing device:\n1. CPU\n2. GPU (CUDA)\nEnter your choice (1/2): ").strip()
+        
+        if choice == "1":
+            display_info("\nUsing CPU for processing.", "info")
+            return "cpu"
+        elif choice == "2":
+            display_info("\nUsing GPU (CUDA) for processing.", "info")
+            return "cuda"
+        else:
+            display_info("\nInvalid choice. Please enter 1 or 2.", "warning")
+
+# Initialize model with optimized settings
+selected_device = select_device()
+transcriber = pipeline(
+    "automatic-speech-recognition",
+    model="vinai/PhoWhisper-medium",
+    device=selected_device,
+    return_timestamps=True,
+    framework="pt",
+    torch_dtype=torch.float16 if selected_device == "cuda" else torch.float32,  # Use half precision only for GPU
+    model_kwargs={"use_cache": True}  # Enable model caching
+)
+
+# Suppress all warnings
+warnings.filterwarnings('ignore')
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
+logging.getLogger('transformers').setLevel(logging.ERROR)
+logging.getLogger('torch').setLevel(logging.ERROR)
+logging.getLogger('numpy').setLevel(logging.ERROR)
+logging.getLogger('pydub').setLevel(logging.ERROR)
+
+# Suppress specific warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
     """
@@ -186,10 +208,10 @@ def process_chunk(chunk_path: str) -> str:
             process_chunk.transcriber = pipeline(
                 "automatic-speech-recognition",
                 model="vinai/PhoWhisper-medium",
-                device="cuda" if torch.cuda.is_available() else "cpu",
+                device=transcriber.device,  # Use the same device as the main transcriber
                 return_timestamps=True,
                 framework="pt",
-                torch_dtype=torch.float16,  # Use half precision for faster processing
+                torch_dtype=torch.float16 if transcriber.device == "cuda" else torch.float32,  # Use half precision only for GPU
                 model_kwargs={
                     "use_cache": True,
                     "low_cpu_mem_usage": True
@@ -200,10 +222,13 @@ def process_chunk(chunk_path: str) -> str:
                 process_chunk.transcriber.model.enable_model_cpu_offload()
             
             # Optimize model for inference
-            if torch.cuda.is_available():
+            if transcriber.device == "cuda":
                 process_chunk.transcriber.model = process_chunk.transcriber.model.eval()
                 with torch.cuda.amp.autocast():
                     process_chunk.transcriber.model = torch.compile(process_chunk.transcriber.model)
+            else:
+                process_chunk.transcriber.model = process_chunk.transcriber.model.eval()
+                process_chunk.transcriber.model = torch.compile(process_chunk.transcriber.model)
         
         # Process the chunk
         result = process_chunk.transcriber(chunk_path)
@@ -959,130 +984,37 @@ def check_file_status(audio_name: str, output_folder: str) -> tuple[bool, bool]:
 
 def process_single_file(audio_path: str, audio_name: str, output_folder: str) -> None:
     """
-    Process a single audio file with user interaction.
-    
+    Process a single audio file without any interactive input.
     Args:
         audio_path (str): Path to the audio file
         audio_name (str): Name of the audio file
         output_folder (str): Path to the output folder
     """
     is_converted, is_transcribed = check_file_status(audio_name, output_folder)
-    
+    base_name = os.path.splitext(audio_name)[0]
+    transcript_file = os.path.join(output_folder, f"{base_name}.txt")
+    processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
+
     if is_transcribed:
-        display_info(f"\nFile {audio_name} has already been processed.", "info")
-        while True:
-            choice = input("\nDo you want to:\n1. Process again from the beginning\n2. Only reprocess with Gemini\n3. Skip this file\nEnter your choice (1/2/3): ").strip()
-            
-            if choice == "1":
-                display_info(f"\nProcessing {audio_name} from the beginning...", "info")
-                # First optimize speed if needed
-                audio = AudioSegment.from_file(audio_path)
-                duration_ms = len(audio)
-                
-                if duration_ms > 10 * 60 * 1000:  # If longer than 10 minutes
-                    display_info("File is longer than 10 minutes. Attempting speed optimization...", "info")
-                    optimal_speed = find_optimal_audio_speed(audio_path)
-                    
-                    if optimal_speed > 1.001:  # Use small tolerance for floating point comparison
-                        display_info(f"Optimal speed {optimal_speed:.2f}x identified", "success")
-                        # Create sped-up version
-                        sped_up_wav_path = os.path.join("audio", f"{os.path.splitext(audio_name)[0]}_speed_{optimal_speed:.2f}x.wav")
-                        try:
-                            ffmpeg_command = [
-                                'ffmpeg', '-i', audio_path,
-                                '-filter:a', f'atempo={optimal_speed}',
-                                '-vn', '-y', sped_up_wav_path
-                            ]
-                            subprocess.run(ffmpeg_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            display_info(f"Created sped-up version: {os.path.basename(sped_up_wav_path)}", "success")
-                            audio_path = sped_up_wav_path  # Use the sped-up version for transcription
-                        except Exception as e:
-                            display_info(f"Error creating sped-up version: {str(e)}", "error")
-                            display_info("Falling back to original speed", "warning")
-                
-                display_info("Transcribing audio...", "info")
-                output_text = transcribe_audio(audio_path)
-                # Save raw transcript
-                base_name = os.path.splitext(audio_name)[0]
-                transcript_file = os.path.join(output_folder, f"{base_name}.txt")
-                with open(transcript_file, "w", encoding="utf-8") as f:
-                    f.write(output_text)
-                display_info(f"✓ Raw transcript saved to: {transcript_file}", "success")
-                
-                display_info("Processing with Gemini...", "info")
-                processed_text = process_transcript_with_gemini(output_text)
-                # Save processed output
-                processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
-                with open(processed_file, "w", encoding="utf-8") as f:
-                    f.write(processed_text)
-                display_info(f"✓ Processed output saved to: {processed_file}", "success")
-                break
-                
-            elif choice == "2":
-                display_info(f"\nReprocessing {audio_name} with Gemini...", "info")
-                # Read existing transcript
-                base_name = os.path.splitext(audio_name)[0]
-                transcript_file = os.path.join(output_folder, f"{base_name}.txt")
-                with open(transcript_file, "r", encoding="utf-8") as f:
-                    output_text = f.read()
-                
-                display_info("Processing with Gemini...", "info")
-                processed_text = process_transcript_with_gemini(output_text)
-                # Save processed output
-                processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
-                with open(processed_file, "w", encoding="utf-8") as f:
-                    f.write(processed_text)
-                display_info(f"✓ Processed output saved to: {processed_file}", "success")
-                break
-                
-            elif choice == "3":
-                display_info(f"\nSkipping {audio_name}", "info")
-                break
-                
-            else:
-                display_info("\nInvalid choice. Please enter 1, 2, or 3.", "warning")
-    
+        display_info(f"\nFile {audio_name} has already been processed. Skipping...", "info")
+        return
     elif is_converted:
-        display_info(f"\nFile {audio_name} has been transcribed but not processed with Gemini.", "info")
-        while True:
-            choice = input("\nDo you want to:\n1. Process with Gemini\n2. Skip this file\nEnter your choice (1/2): ").strip()
-            
-            if choice == "1":
-                display_info(f"\nProcessing {audio_name} with Gemini...", "info")
-                # Read existing transcript
-                base_name = os.path.splitext(audio_name)[0]
-                transcript_file = os.path.join(output_folder, f"{base_name}.txt")
-                with open(transcript_file, "r", encoding="utf-8") as f:
-                    output_text = f.read()
-                
-                processed_text = process_transcript_with_gemini(output_text)
-                # Save processed output
-                processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
-                with open(processed_file, "w", encoding="utf-8") as f:
-                    f.write(processed_text)
-                display_info(f"✓ Processed output saved to: {processed_file}", "success")
-                break 
-                
-            elif choice == "2":
-                display_info(f"\nSkipping {audio_name}", "info")
-                break
-                
-            else:
-                display_info("\nInvalid choice. Please enter 1 or 2.", "warning")
-    
+        display_info(f"\nFile {audio_name} has been transcribed but not processed with Gemini. Processing with Gemini...", "info")
+        with open(transcript_file, "r", encoding="utf-8") as f:
+            output_text = f.read()
+        processed_text = process_transcript_with_gemini(output_text)
+        with open(processed_file, "w", encoding="utf-8") as f:
+            f.write(processed_text)
+        display_info(f"✓ Processed output saved to: {processed_file}", "success")
     else:
         display_info(f"\nProcessing new file: {audio_name}", "info")
-        # First optimize speed if needed
         audio = AudioSegment.from_file(audio_path)
         duration_ms = len(audio)
-        
         if duration_ms > 10 * 60 * 1000:  # If longer than 10 minutes
             display_info("File is longer than 10 minutes. Attempting speed optimization...", "info")
             optimal_speed = find_optimal_audio_speed(audio_path)
-            
-            if optimal_speed > 1.001:  # Use small tolerance for floating point comparison
+            if optimal_speed > 1.001:
                 display_info(f"Optimal speed {optimal_speed:.2f}x identified", "success")
-                # Create sped-up version
                 sped_up_wav_path = os.path.join("audio", f"{os.path.splitext(audio_name)[0]}_speed_{optimal_speed:.2f}x.wav")
                 try:
                     ffmpeg_command = [
@@ -1092,24 +1024,17 @@ def process_single_file(audio_path: str, audio_name: str, output_folder: str) ->
                     ]
                     subprocess.run(ffmpeg_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     display_info(f"Created sped-up version: {os.path.basename(sped_up_wav_path)}", "success")
-                    audio_path = sped_up_wav_path  # Use the sped-up version for transcription
+                    audio_path = sped_up_wav_path
                 except Exception as e:
                     display_info(f"Error creating sped-up version: {str(e)}", "error")
                     display_info("Falling back to original speed", "warning")
-        
         display_info("Transcribing audio...", "info")
         output_text = transcribe_audio(audio_path)
-        # Save raw transcript
-        base_name = os.path.splitext(audio_name)[0]
-        transcript_file = os.path.join(output_folder, f"{base_name}.txt")
         with open(transcript_file, "w", encoding="utf-8") as f:
             f.write(output_text)
         display_info(f"✓ Raw transcript saved to: {transcript_file}", "success")
-        
         display_info("Processing with Gemini...", "info")
         processed_text = process_transcript_with_gemini(output_text)
-        # Save processed output
-        processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
         with open(processed_file, "w", encoding="utf-8") as f:
             f.write(processed_text)
         display_info(f"✓ Processed output saved to: {processed_file}", "success")
@@ -1292,7 +1217,7 @@ def optimize_model_for_inference():
     """
     global transcriber
     
-    if torch.cuda.is_available():
+    if transcriber.device == "cuda":
         # Enable CUDA optimizations
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
@@ -1506,8 +1431,79 @@ if __name__ == "__main__":
                 sys.exit(0)
             else:
                 display_info(f"\nFound {len(wav_files)} files to process.", "info")
-                # Process files in parallel
-                process_files_parallel(wav_files, audio_folder, output_folder)
+                
+                # Display file management options
+                while True:
+                    display_info("\nFile Management Options:", "info")
+                    display_info("1. Process all files", "info")
+                    display_info("2. Select specific files to process", "info")
+                    display_info("3. Skip all files", "info")
+                    display_info("4. Delete all files in audio folder", "info")
+                    display_info("5. Exit", "info")
+                    
+                    choice = input("\nEnter your choice (1-5): ").strip()
+                    
+                    if choice == "1":
+                        # Process all files in parallel
+                        process_files_parallel(wav_files, audio_folder, output_folder)
+                        break
+                        
+                    elif choice == "2":
+                        # List all files with numbers
+                        display_info("\nAvailable files:", "info")
+                        for i, file in enumerate(wav_files, 1):
+                            display_info(f"{i}. {file}", "info")
+                        
+                        # Get user selection
+                        while True:
+                            selection = input("\nEnter file numbers to process (comma-separated) or 'all' for all files: ").strip()
+                            
+                            if selection.lower() == 'all':
+                                selected_files = wav_files
+                                break
+                            else:
+                                try:
+                                    # Parse selected numbers
+                                    numbers = [int(n.strip()) for n in selection.split(',')]
+                                    # Validate numbers
+                                    if all(1 <= n <= len(wav_files) for n in numbers):
+                                        selected_files = [wav_files[n-1] for n in numbers]
+                                        break
+                                    else:
+                                        display_info("Invalid file numbers. Please try again.", "warning")
+                                except ValueError:
+                                    display_info("Invalid input. Please enter numbers separated by commas.", "warning")
+                        
+                        # Process selected files
+                        if selected_files:
+                            process_files_parallel(selected_files, audio_folder, output_folder)
+                        break
+                        
+                    elif choice == "3":
+                        display_info("\nSkipping all files.", "info")
+                        break
+                        
+                    elif choice == "4":
+                        confirm = input("\nAre you sure you want to delete all files in the audio folder? (yes/no): ").strip().lower()
+                        if confirm == 'yes':
+                            try:
+                                for file in os.listdir(audio_folder):
+                                    file_path = os.path.join(audio_folder, file)
+                                    if os.path.isfile(file_path):
+                                        os.remove(file_path)
+                                display_info("\nAll files in audio folder have been deleted.", "success")
+                            except Exception as e:
+                                display_info(f"\nError deleting files: {str(e)}", "error")
+                        else:
+                            display_info("\nOperation cancelled.", "info")
+                        break
+                        
+                    elif choice == "5":
+                        display_info("\nExiting program.", "info")
+                        sys.exit(0)
+                        
+                    else:
+                        display_info("\nInvalid choice. Please enter a number between 1 and 5.", "warning")
 
         # Clean up audio files after processing
         cleanup_audio_files()
