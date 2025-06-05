@@ -134,6 +134,7 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
             split_points.append(len(audio))
         
         # Create chunks based on split points
+        chunk_count = 0
         for i in range(len(split_points) - 1):
             start = split_points[i]
             end = split_points[i + 1]
@@ -141,13 +142,14 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
             
             # Only save chunks that are long enough and have audible sound
             if len(chunk) >= min_chunk_length and chunk.dBFS > min_silence_threshold:
-                temp_file = f"temp_chunk_{i}.wav"
+                temp_file = f"temp_chunk_{chunk_count}.wav"
                 chunk.export(
                     temp_file,
                     format="wav",
                     parameters=["-ac", "1", "-ar", "16000"]
                 )
                 temp_files.append(temp_file)
+                chunk_count += 1
         
         if not temp_files:
             display_info("Warning: No valid chunks created. Using original audio file.", "warning")
@@ -242,13 +244,14 @@ def transcribe_audio(audio_path: str, max_workers: int = None) -> str:
                 if torch.cuda.is_available():
                     max_workers = torch.cuda.device_count()
                 else:
-                    max_workers = min(cpu_count(), 4)  # Limit CPU workers to prevent overload
+                    max_workers = min(os.cpu_count() or 4, 4)  # Limit CPU workers to prevent overload
             
             # Process chunks in parallel with optimized settings
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(process_chunk, temp_file): temp_file 
                           for temp_file in temp_files}
                 
+                # Wait for all futures to complete
                 for future in tqdm(as_completed(futures), total=len(futures), desc="Processing chunks"):
                     chunk_path = futures[future]
                     try:
@@ -606,18 +609,48 @@ def convert_to_wav(input_folder: str, output_folder: str) -> list[str]:
     display_info(f"\nFound {len(files_to_process)} files to process", "info")
     return files_to_process
 
-def cleanup_audio_folder(folder_path: str) -> None:
-    """Delete all files in the specified audio folder after processing."""
-    files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
-    if not files:
-        return
-
+def cleanup_audio_files():
+    """
+    Clean up all audio files in the audio folder that have been processed.
+    Only deletes files that have corresponding processed files in the output folder.
+    """
     display_info("\nCleaning up audio files...", "info")
-    for file_name in tqdm(files, desc="Deleting files"):
-        file_path = os.path.join(folder_path, file_name)
-        if os.path.isfile(file_path):
-            os.remove(file_path)
-            display_info(f"Removed: {file_name}", "success")
+    
+    audio_folder = "audio"
+    output_folder = "output"
+    
+    if not os.path.exists(audio_folder):
+        return
+        
+    try:
+        # Get list of all files in audio folder
+        files = [f for f in os.listdir(audio_folder) if os.path.isfile(os.path.join(audio_folder, f))]
+        
+        if not files:
+            display_info("No files to clean up in audio folder", "info")
+            return
+            
+        display_info(f"Found {len(files)} files to check", "info")
+        
+        # Check and remove each file
+        for file_name in tqdm(files, desc="Checking files"):
+            file_path = os.path.join(audio_folder, file_name)
+            base_name = os.path.splitext(file_name)[0]
+            processed_file = os.path.join(output_folder, f"{base_name}_processed.txt")
+            
+            try:
+                if os.path.isfile(file_path):
+                    # Check if file has been processed
+                    if os.path.exists(processed_file):
+                        display_info(f"File {file_name} has been processed. Skipping.", "info")
+                    else:
+                        display_info(f"File {file_name} has not been processed. Keeping.", "info")
+            except Exception as e:
+                display_info(f"Error checking/removing {file_name}: {str(e)}", "error")
+                
+        display_info("Audio folder cleanup completed", "success")
+    except Exception as e:
+        display_info(f"Error during cleanup: {str(e)}", "error")
 
 def download_youtube_audio(url: str, output_folder: str = "audio") -> str:
     """
@@ -784,12 +817,12 @@ def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_de
             )
             
             # Generate response with streaming
-            response = model.generate_content(prompt, stream=True)
+            response = model.generate_content(prompt, stream=False)
             
             full_response = ""
             for chunk in response:
                 if chunk.text:
-                    display_info(chunk.text, end="", flush=True)
+                    print(chunk.text, end="", flush=True)
                     full_response += chunk.text
             
             if full_response:
@@ -860,7 +893,7 @@ Hãy trả lời bằng tiếng Việt và đảm bảo câu trả lời:
             full_response = ""
             for chunk in response:
                 if chunk.text:
-                    display_info(chunk.text, end="", flush=True)
+                    print(chunk.text, end="", flush=True)
                     full_response += chunk.text
             
             if full_response:
@@ -944,7 +977,7 @@ def process_single_file(audio_path: str, audio_name: str, output_folder: str) ->
                     if optimal_speed > 1.001:  # Use small tolerance for floating point comparison
                         display_info(f"Optimal speed {optimal_speed:.2f}x identified", "success")
                         # Create sped-up version
-                        sped_up_wav_path = os.path.join(output_folder, f"{os.path.splitext(audio_name)[0]}_speed_{optimal_speed:.2f}x.wav")
+                        sped_up_wav_path = os.path.join("audio", f"{os.path.splitext(audio_name)[0]}_speed_{optimal_speed:.2f}x.wav")
                         try:
                             ffmpeg_command = [
                                 'ffmpeg', '-i', audio_path,
@@ -1041,7 +1074,7 @@ def process_single_file(audio_path: str, audio_name: str, output_folder: str) ->
             if optimal_speed > 1.001:  # Use small tolerance for floating point comparison
                 display_info(f"Optimal speed {optimal_speed:.2f}x identified", "success")
                 # Create sped-up version
-                sped_up_wav_path = os.path.join(output_folder, f"{os.path.splitext(audio_name)[0]}_speed_{optimal_speed:.2f}x.wav")
+                sped_up_wav_path = os.path.join("audio", f"{os.path.splitext(audio_name)[0]}_speed_{optimal_speed:.2f}x.wav")
                 try:
                     ffmpeg_command = [
                         'ffmpeg', '-i', audio_path,
@@ -1077,162 +1110,116 @@ def find_optimal_audio_speed(clean_wav_path: str) -> float:
     Determines the optimal playback speed for an audio file that maintains
     a minimum transcription accuracy.
     Returns the optimal speed multiplier (e.g., 1.0, 1.25).
-    This function is called with a path to a clean (normalized, 16kHz mono) WAV file.
     """
-    display_info(f"\nAttempting to find optimal speed for: {os.path.basename(clean_wav_path)}", "info")
+    display_info(f"\nFinding optimal speed for: {os.path.basename(clean_wav_path)}", "info")
     
     try:
         audio = AudioSegment.from_file(clean_wav_path)
     except Exception as e:
-        display_info(f"Error loading audio for speed test: {e}. Defaulting to 1.0x speed.", "warning")
+        display_info(f"Error loading audio: {e}. Using default speed 1.0x.", "warning")
         return 1.0
 
+    # Test speeds from 1.0x to 2.25x
     speeds_to_try = [1.0, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0, 2.25]
-    # Configuration for segments: (length_ms, number_of_segments_for_this_length)
-    test_segments_config = [(10000, 2), (20000, 1)] # e.g., two 10s segments, one 20s segment
     
-    display_info("\nExtracting random segments for speed testing...", "info")
-    all_random_segments_data = [] # Will store (AudioSegment_object, start_time_ms)
-    for length_ms, num_to_extract in test_segments_config:
-         segments_for_this_config = extract_random_segments(audio, [length_ms], num_segments=num_to_extract)
-         all_random_segments_data.extend(segments_for_this_config)
-
-    if not all_random_segments_data:
-        display_info("No valid audio segments extracted for speed testing. Defaulting to 1.0x speed.", "warning")
+    # Extract a 30-second segment from the middle of the audio
+    middle_point = len(audio) // 2
+    test_segment = audio[middle_point - 15000:middle_point + 15000]
+    
+    if len(test_segment) < 10000:  # If audio is too short
+        display_info("Audio is too short for speed testing. Using default speed 1.0x.", "warning")
         return 1.0
     
-    display_info(f"Testing with {len(all_random_segments_data)} random segments.", "info")
-
-    min_similarity_threshold = 0.5  # 50% average similarity needed for a segment to pass
-    min_segments_passed_ratio = 0.7 # At least 70% of tested segments must pass the threshold
-
-    speed_test_details = {} # { segment_id: { speed: {avg_similarity, transcript} } }
-
-    # Create a temporary directory for storing segment WAV files for this run
-    with tempfile.TemporaryDirectory(prefix="phowhisper_speed_segments_", dir=".") as temp_dir_for_segments:
-        baseline_transcripts_map = {} # segment_id: baseline_transcript_text
-
-        # 1. Export segments and get their baseline (1.0x speed) transcripts
-        display_info("Generating baseline transcripts for segments...", "info")
-        for i, (segment_audio_obj, segment_start_time) in enumerate(all_random_segments_data):
-            segment_id_str = f"segment{i}_len{len(segment_audio_obj)/1000:.0f}s_start{segment_start_time/1000:.0f}s"
-            original_segment_wav_filename = f"{segment_id_str}_original.wav"
-            original_segment_wav_path = os.path.join(temp_dir_for_segments, original_segment_wav_filename)
-            
-            try:
-                segment_audio_obj.export(original_segment_wav_path, format="wav")
-                baseline_txt = transcribe_audio(original_segment_wav_path)
-                if baseline_txt and not baseline_txt.startswith("Error:") and baseline_txt != "File not found":
-                    baseline_transcripts_map[segment_id_str] = baseline_txt
-                else:
-                    display_info(f"Warning: Failed to get baseline for {segment_id_str}. Reason: '{baseline_txt}'", "warning")
-                    baseline_transcripts_map[segment_id_str] = "" # Mark as failed to skip in similarity
-            except Exception as e_base:
-                display_info(f"Error during baseline processing for {segment_id_str}: {e_base}", "error")
-                baseline_transcripts_map[segment_id_str] = ""
-        
-        num_valid_baselines = sum(1 for t in baseline_transcripts_map.values() if t)
-        if num_valid_baselines == 0:
-            display_info("No valid baseline transcripts obtained for any segment. Cannot perform speed test. Defaulting to 1.0x.", "warning")
-            return 1.0
-        display_info(f"Obtained {num_valid_baselines}/{len(all_random_segments_data)} valid baseline transcripts.", "info")
-
-        # 2. Test each speed for each segment that has a valid baseline
-        for speed_multiplier in tqdm(speeds_to_try, desc="Testing Speeds", ncols=80, leave=False):
-            for i, (segment_audio_obj, segment_start_time) in enumerate(all_random_segments_data):
-                segment_id_str = f"segment{i}_len{len(segment_audio_obj)/1000:.0f}s_start{segment_start_time/1000:.0f}s"
-                
-                if not baseline_transcripts_map.get(segment_id_str): # Skip if baseline failed for this segment
-                    continue
-                
-                if segment_id_str not in speed_test_details: speed_test_details[segment_id_str] = {}
-
-                if speed_multiplier == 1.0:
-                    speed_test_details[segment_id_str][speed_multiplier] = {
-                        "average_similarity": 1.0, 
-                        "transcript": baseline_transcripts_map[segment_id_str]
-                    }
-                    continue # Already have baseline, similarity is 1.0
-
-                sped_up_wav_filename = f"{segment_id_str}_speed{speed_multiplier:.2f}x.wav"
-                sped_up_wav_path = os.path.join(temp_dir_for_segments, sped_up_wav_filename)
-                original_segment_wav_path = os.path.join(temp_dir_for_segments, f"{segment_id_str}_original.wav")
-
-                try:
-                    ffmpeg_command = ['ffmpeg', '-i', original_segment_wav_path, 
-                                      '-filter:a', f'atempo={speed_multiplier}', '-vn', '-y', sped_up_wav_path]
-                    subprocess.run(ffmpeg_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    
-                    sped_up_txt = transcribe_audio(sped_up_wav_path)
-                    if sped_up_txt and not sped_up_txt.startswith("Error:") and sped_up_txt != "File not found":
-                        similarity_info = calculate_text_similarity(baseline_transcripts_map[segment_id_str], sped_up_txt)
-                        avg_sim = similarity_info["average_similarity_score"]
-                        speed_test_details[segment_id_str][speed_multiplier] = {"average_similarity": avg_sim, "transcript": sped_up_txt}
-                    else:
-                        speed_test_details[segment_id_str][speed_multiplier] = {"average_similarity": 0.0, "transcript": ""}
-                except Exception as e_speed_proc:
-                    speed_test_details[segment_id_str][speed_multiplier] = {"average_similarity": 0.0, "transcript": ""}
-
-        # 3. Determine optimal speed based on results
-        segments_passed_at_each_speed = {s: 0 for s in speeds_to_try}
-        for segment_id_str, results_for_segment in speed_test_details.items():
-            if not baseline_transcripts_map.get(segment_id_str): continue # Ensure baseline was valid
-            for speed_val, result_data in results_for_segment.items():
-                if result_data["average_similarity"] >= min_similarity_threshold:
-                    segments_passed_at_each_speed[speed_val] += 1
-        
-        final_optimal_speed = 1.0 # Default
-        
-        eligible_speeds_meeting_criteria = []
-        for speed_val, num_passed_segments in segments_passed_at_each_speed.items():
-            if num_valid_baselines > 0 and num_passed_segments >= num_valid_baselines * min_segments_passed_ratio:
-                eligible_speeds_meeting_criteria.append(speed_val)
-        
-        if eligible_speeds_meeting_criteria:
-            final_optimal_speed = max(eligible_speeds_meeting_criteria)
-        else:
-            # Fallback: if no speed meets the 70% segment passage criteria,
-            # find the speed that had the highest number of passed segments.
-            if any(segments_passed_at_each_speed.values()): # Check if any speed had any success
-                max_passed_count = max(segments_passed_at_each_speed.values())
-                if max_passed_count > 0:
-                    speeds_with_max_passed_count = [s for s, c in segments_passed_at_each_speed.items() if c == max_passed_count]
-                    if speeds_with_max_passed_count:
-                        final_optimal_speed = max(speeds_with_max_passed_count)
+    # Save the test segment
+    test_segment_path = "temp_speed_test.wav"
+    test_segment.export(test_segment_path, format="wav", parameters=["-ac", "1", "-ar", "16000"])
     
-    display_info(f"✓ Optimal speed identified for {os.path.basename(clean_wav_path)}: {final_optimal_speed}x", "success")
-    return final_optimal_speed
+    try:
+        # Get baseline transcript at 1.0x speed
+        baseline_text = transcribe_audio(test_segment_path)
+        if not baseline_text or baseline_text.startswith("Error:"):
+            display_info("Failed to get baseline transcript. Using default speed 1.0x.", "warning")
+            return 1.0
+            
+        best_speed = 1.0
+        best_similarity = 1.0
+        min_similarity_threshold = 0.5  # 50% average similarity needed for a segment to pass
+        min_segments_passed_ratio = 0.7  # At least 70% of tested segments must pass the threshold
+        
+        # Test each speed
+        speed_results = {speed: 0 for speed in speeds_to_try}  # Track successful tests for each speed
+        
+        for speed in tqdm(speeds_to_try, desc="Testing speeds", ncols=80, leave=False):
+            if speed == 1.0:
+                continue  # Skip baseline speed
+                
+            # Create sped-up version
+            sped_up_path = f"temp_speed_test_{speed}x.wav"
+            try:
+                ffmpeg_command = [
+                    'ffmpeg', '-i', test_segment_path,
+                    '-filter:a', f'atempo={speed}',
+                    '-vn', '-y', sped_up_path
+                ]
+                subprocess.run(ffmpeg_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # Get transcript at this speed
+                sped_up_text = transcribe_audio(sped_up_path)
+                if sped_up_text and not sped_up_text.startswith("Error:"):
+                    # Calculate similarity
+                    similarity = calculate_text_similarity(baseline_text, sped_up_text)["average_similarity_score"]
+                    
+                    # Track successful tests
+                    if similarity >= min_similarity_threshold:
+                        speed_results[speed] += 1
+                    
+                    # Update best speed if this one is better
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        best_speed = speed
+                        
+            except Exception as e:
+                display_info(f"Error testing speed {speed}x: {str(e)}", "warning")
+                continue
+            finally:
+                # Clean up sped-up file
+                if os.path.exists(sped_up_path):
+                    os.remove(sped_up_path)
+        
+        # Clean up test segment
+        if os.path.exists(test_segment_path):
+            os.remove(test_segment_path)
+            
+        # Find speeds that meet the minimum threshold
+        eligible_speeds = []
+        for speed, success_count in speed_results.items():
+            if success_count >= min_segments_passed_ratio:
+                eligible_speeds.append(speed)
+        
+        if eligible_speeds:
+            # Choose the highest speed that meets the criteria
+            final_speed = max(eligible_speeds)
+            display_info(f"✓ Optimal speed found: {final_speed}x (similarity: {best_similarity:.2f})", "success")
+            return final_speed
+        else:
+            # If no speed meets the criteria, use the one with best similarity
+            if best_similarity > min_similarity_threshold:
+                display_info(f"✓ Best available speed found: {best_speed}x (similarity: {best_similarity:.2f})", "success")
+                return best_speed
+            else:
+                display_info("No suitable speed found. Using default speed 1.0x.", "info")
+                return 1.0
+            
+    except Exception as e:
+        display_info(f"Error during speed testing: {str(e)}. Using default speed 1.0x.", "warning")
+        return 1.0
 
 def cleanup_temp_files() -> None:
     """
-    Clean up all temporary files before starting the program.
-    This includes files in the audio folder, output folder, and any temp files.
+    Clean up only temporary files in the root directory.
+    Does not delete files in the audio and output folders.
     """
     display_info("Cleaning up temporary files...", "info")
-    
-    # Clean audio folder
-    audio_folder = "audio"
-    if os.path.exists(audio_folder):
-        for file in os.listdir(audio_folder):
-            file_path = os.path.join(audio_folder, file)
-            try:
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                    display_info(f"Removed: {file}", "success")
-            except Exception as e:
-                display_info(f"Error removing {file}: {str(e)}", "error")
-    
-    # Clean output folder
-    output_folder = "output"
-    if os.path.exists(output_folder):
-        for file in os.listdir(output_folder):
-            file_path = os.path.join(output_folder, file)
-            try:
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                    display_info(f"Removed: {file}", "success")
-            except Exception as e:
-                display_info(f"Error removing {file}: {str(e)}", "error")
     
     # Clean any temp files in current directory
     for file in os.listdir("."):
@@ -1286,10 +1273,8 @@ def optimize_memory_usage():
     # Clear Python garbage collector
     gc.collect()
     
-    # Clear system cache if possible
-    if os.name == 'nt':  # Windows
-        os.system('powershell -Command "Clear-RecycleBin -Force"')
-    elif os.name == 'posix':  # Linux/Mac
+    # Clear system cache if possible (only on Linux/Mac)
+    if os.name == 'posix':  # Linux/Mac
         os.system('sync; echo 3 > /proc/sys/vm/drop_caches')
 
 def optimize_model_for_inference():
@@ -1381,40 +1366,6 @@ def create_temp_audio_file(audio: AudioSegment, prefix: str = "temp", suffix: st
         display_info(f"Error creating temporary audio file: {str(e)}", "error")
         return None
 
-def cleanup_audio_files():
-    """
-    Clean up all audio files in the audio folder.
-    """
-    display_info("\nCleaning up audio files...", "info")
-    
-    audio_folder = "audio"
-    if not os.path.exists(audio_folder):
-        return
-        
-    try:
-        # Get list of all files in audio folder
-        files = [f for f in os.listdir(audio_folder) if os.path.isfile(os.path.join(audio_folder, f))]
-        
-        if not files:
-            display_info("No files to clean up in audio folder", "info")
-            return
-            
-        display_info(f"Found {len(files)} files to clean up", "info")
-        
-        # Remove each file
-        for file_name in tqdm(files, desc="Cleaning up files"):
-            file_path = os.path.join(audio_folder, file_name)
-            try:
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                    display_info(f"Removed: {file_name}", "success")
-            except Exception as e:
-                display_info(f"Error removing {file_name}: {str(e)}", "error")
-                
-        display_info("Audio folder cleanup completed", "success")
-    except Exception as e:
-        display_info(f"Error during cleanup: {str(e)}", "error")
-
 def process_audio_chunk(chunk: AudioSegment, chunk_id: int) -> str:
     """
     Process a single audio chunk with optimized settings.
@@ -1468,21 +1419,30 @@ def split_audio_optimized(audio_path: str, chunk_length_ms: int = 30000) -> List
         # Create chunks
         chunks = make_chunks(audio, chunk_length_ms)
         
-        # Process chunks in parallel
-        with ThreadPoolExecutor() as executor:
-            futures = []
-            for i, chunk in enumerate(chunks):
-                future = executor.submit(process_audio_chunk, chunk, i)
-                futures.append(future)
-            
-            # Collect results
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing chunks"):
-                try:
-                    result = future.result()
-                    if result:
-                        temp_files.append(result)
-                except Exception as e:
-                    display_info(f"Error processing chunk: {str(e)}", "error")
+        # Process chunks sequentially
+        for i, chunk in enumerate(chunks):
+            try:
+                # Optimize chunk
+                chunk = optimize_audio_processing(chunk)
+                
+                # Save to temporary file in audio folder
+                temp_file = create_temp_audio_file(chunk, f"chunk_{i}")
+                if not temp_file:
+                    continue
+                
+                # Process chunk
+                result = process_audio_chunk(chunk, i)
+                if result:
+                    temp_files.append(result)
+                
+                # Clean up
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                    track_temp_files('process', temp_file)
+                    
+            except Exception as e:
+                display_info(f"Error processing chunk {i}: {str(e)}", "error")
+                continue
         
         return temp_files
     except Exception as e:
