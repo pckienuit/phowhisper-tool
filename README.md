@@ -14,6 +14,19 @@ This tool is your intelligent assistant for listening to audio recordings, YouTu
 - **Seamless Gemini integration:** Processes transcripts with Gemini for advanced post-processing.
 - **Output management:** Saves both raw and processed transcripts to the `output` folder.
 
+## Getting a Gemini API Key
+This tool uses Gemini AI for advanced transcript processing. You need a Gemini API key to use this feature.
+
+1. Go to [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) and sign in with your Google account.
+2. Click "Create API key" and follow the instructions.
+3. Copy the generated API key.
+4. Create a file named `.env` in the project root (if it doesn't exist).
+5. Add the following line to your `.env` file:
+   ```
+   GEMINI_API_KEY=your_api_key_here
+   ```
+6. Save the file. You're ready to use Gemini features!
+
 ## Requirements
 - Python 3.8 or higher
 - FFmpeg installed on your system
