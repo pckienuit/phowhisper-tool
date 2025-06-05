@@ -22,6 +22,7 @@ import random
 from difflib import SequenceMatcher
 import tempfile
 import time
+import argparse
 
 # Load environment variables
 load_dotenv()
@@ -50,26 +51,48 @@ def display_info(message: str, level: str = "info") -> None:
     elif level == "error":
         print(f"\n❌ {message}")
 
-def select_device() -> str:
+def select_device(mode: str = None, cli_device: str = None) -> str:
     """
-    Allow user to select between CPU and GPU for processing.
-    Returns the selected device ('cpu' or 'cuda').
+    Select device for processing: auto (prefer GPU), or manual (ask user or use CLI arg).
+    Args:
+        mode (str): 'auto' or 'manual'
+        cli_device (str): 'cpu' or 'cuda' if provided from CLI
+    Returns:
+        str: 'cpu' or 'cuda'
     """
-    if not torch.cuda.is_available():
-        display_info("\nGPU not available. Using CPU for processing.", "warning")
-        return "cpu"
-    
-    while True:
-        choice = input("\nSelect processing device:\n1. CPU\n2. GPU (CUDA)\nEnter your choice (1/2): ").strip()
-        
-        if choice == "1":
-            display_info("\nUsing CPU for processing.", "info")
-            return "cpu"
-        elif choice == "2":
-            display_info("\nUsing GPU (CUDA) for processing.", "info")
+    if mode == 'auto':
+        if torch.cuda.is_available():
+            display_info("\n[Auto] GPU detected. Using GPU (CUDA) for processing.", "info")
             return "cuda"
         else:
-            display_info("\nInvalid choice. Please enter 1 or 2.", "warning")
+            display_info("\n[Auto] GPU not available. Using CPU for processing.", "warning")
+            return "cpu"
+    elif mode == 'manual':
+        if cli_device in ('cpu', 'cuda'):
+            display_info(f"\n[Manual] Using {cli_device.upper()} for processing (from CLI)", "info")
+            return cli_device
+        # If not provided, ask user
+        if not torch.cuda.is_available():
+            display_info("\nGPU not available. Using CPU for processing.", "warning")
+            return "cpu"
+        while True:
+            choice = input("\nSelect processing device:\n1. CPU\n2. GPU (CUDA)\nEnter your choice (1/2): ").strip()
+            if choice == "1":
+                display_info("\nUsing CPU for processing.", "info")
+                return "cpu"
+            elif choice == "2":
+                display_info("\nUsing GPU (CUDA) for processing.", "info")
+                return "cuda"
+            else:
+                display_info("\nInvalid choice. Please enter 1 or 2.", "warning")
+    else:
+        # Default: auto
+        if torch.cuda.is_available():
+            display_info("\n[Default] GPU detected. Using GPU (CUDA) for processing.", "info")
+            return "cuda"
+        else:
+            display_info("\n[Default] GPU not available. Using CPU for processing.", "warning")
+            return "cpu"
 
 # Initialize model with optimized settings
 selected_device = select_device()
@@ -1008,26 +1031,30 @@ def process_single_file(audio_path: str, audio_name: str, output_folder: str) ->
         display_info(f"✓ Processed output saved to: {processed_file}", "success")
     else:
         display_info(f"\nProcessing new file: {audio_name}", "info")
-        audio = AudioSegment.from_file(audio_path)
-        duration_ms = len(audio)
-        if duration_ms > 10 * 60 * 1000:  # If longer than 10 minutes
-            display_info("File is longer than 10 minutes. Attempting speed optimization...", "info")
-            optimal_speed = find_optimal_audio_speed(audio_path)
-            if optimal_speed > 1.001:
-                display_info(f"Optimal speed {optimal_speed:.2f}x identified", "success")
-                sped_up_wav_path = os.path.join("audio", f"{os.path.splitext(audio_name)[0]}_speed_{optimal_speed:.2f}x.wav")
-                try:
-                    ffmpeg_command = [
-                        'ffmpeg', '-i', audio_path,
-                        '-filter:a', f'atempo={optimal_speed}',
-                        '-vn', '-y', sped_up_wav_path
-                    ]
-                    subprocess.run(ffmpeg_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    display_info(f"Created sped-up version: {os.path.basename(sped_up_wav_path)}", "success")
-                    audio_path = sped_up_wav_path
-                except Exception as e:
-                    display_info(f"Error creating sped-up version: {str(e)}", "error")
-                    display_info("Falling back to original speed", "warning")
+        # If file is already a _speed file, skip optimal speed detection
+        if '_speed' in audio_name:
+            display_info("File is a _speed file. Skipping optimal speed detection.", "info")
+        else:
+            audio = AudioSegment.from_file(audio_path)
+            duration_ms = len(audio)
+            if duration_ms > 10 * 60 * 1000:  # If longer than 10 minutes
+                display_info("File is longer than 10 minutes. Attempting speed optimization...", "info")
+                optimal_speed = find_optimal_audio_speed(audio_path)
+                if optimal_speed > 1.001:
+                    display_info(f"Optimal speed {optimal_speed:.2f}x identified", "success")
+                    sped_up_wav_path = os.path.join("audio", f"{os.path.splitext(audio_name)[0]}_speed_{optimal_speed:.2f}x.wav")
+                    try:
+                        ffmpeg_command = [
+                            'ffmpeg', '-i', audio_path,
+                            '-filter:a', f'atempo={optimal_speed}',
+                            '-vn', '-y', sped_up_wav_path
+                        ]
+                        subprocess.run(ffmpeg_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        display_info(f"Created sped-up version: {os.path.basename(sped_up_wav_path)}", "success")
+                        audio_path = sped_up_wav_path
+                    except Exception as e:
+                        display_info(f"Error creating sped-up version: {str(e)}", "error")
+                        display_info("Falling back to original speed", "warning")
         display_info("Transcribing audio...", "info")
         output_text = transcribe_audio(audio_path)
         with open(transcript_file, "w", encoding="utf-8") as f:
@@ -1385,6 +1412,11 @@ def split_audio_optimized(audio_path: str, chunk_length_ms: int = 30000) -> List
 
 # Main execution
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="PhoWhisper CLI")
+    parser.add_argument('--mode', choices=['auto', 'manual'], default='auto', help='Device selection mode: auto/manual (default: auto)')
+    parser.add_argument('--device', choices=['cpu', 'cuda'], default=None, help='Device to use if manual')
+    args, unknown = parser.parse_known_args()
+
     audio_folder = "audio"
     output_folder = "output"
     
@@ -1394,6 +1426,18 @@ if __name__ == "__main__":
     
     # Optimize system resources
     optimize_memory_usage()
+    
+    # Device selection
+    selected_device = select_device(args.mode, args.device)
+    transcriber = pipeline(
+        "automatic-speech-recognition",
+        model="vinai/PhoWhisper-medium",
+        device=selected_device,
+        return_timestamps=True,
+        framework="pt",
+        torch_dtype=torch.float16 if selected_device == "cuda" else torch.float32,  # Use half precision only for GPU
+        model_kwargs={"use_cache": True}  # Enable model caching
+    )
     optimize_model_for_inference()
     
     # Clean up temporary files before starting
@@ -1432,78 +1476,108 @@ if __name__ == "__main__":
             else:
                 display_info(f"\nFound {len(wav_files)} files to process.", "info")
                 
-                # Display file management options
-                while True:
-                    display_info("\nFile Management Options:", "info")
-                    display_info("1. Process all files", "info")
-                    display_info("2. Select specific files to process", "info")
-                    display_info("3. Skip all files", "info")
-                    display_info("4. Delete all files in audio folder", "info")
-                    display_info("5. Exit", "info")
-                    
-                    choice = input("\nEnter your choice (1-5): ").strip()
-                    
-                    if choice == "1":
-                        # Process all files in parallel
-                        process_files_parallel(wav_files, audio_folder, output_folder)
-                        break
-                        
-                    elif choice == "2":
-                        # List all files with numbers
-                        display_info("\nAvailable files:", "info")
-                        for i, file in enumerate(wav_files, 1):
-                            display_info(f"{i}. {file}", "info")
-                        
-                        # Get user selection
-                        while True:
-                            selection = input("\nEnter file numbers to process (comma-separated) or 'all' for all files: ").strip()
-                            
-                            if selection.lower() == 'all':
-                                selected_files = wav_files
-                                break
-                            else:
-                                try:
-                                    # Parse selected numbers
-                                    numbers = [int(n.strip()) for n in selection.split(',')]
-                                    # Validate numbers
-                                    if all(1 <= n <= len(wav_files) for n in numbers):
-                                        selected_files = [wav_files[n-1] for n in numbers]
-                                        break
-                                    else:
-                                        display_info("Invalid file numbers. Please try again.", "warning")
-                                except ValueError:
-                                    display_info("Invalid input. Please enter numbers separated by commas.", "warning")
-                        
-                        # Process selected files
-                        if selected_files:
-                            process_files_parallel(selected_files, audio_folder, output_folder)
-                        break
-                        
-                    elif choice == "3":
-                        display_info("\nSkipping all files.", "info")
-                        break
-                        
-                    elif choice == "4":
-                        confirm = input("\nAre you sure you want to delete all files in the audio folder? (yes/no): ").strip().lower()
-                        if confirm == 'yes':
+                # Auto mode: delete already processed files, process the rest
+                if args.mode == 'auto':
+                    files_to_process = []
+                    # Build a set of base names for speed files
+                    speed_bases = set()
+                    for file_name in wav_files:
+                        if '_speed' in file_name:
+                            base = file_name.split('_speed')[0]
+                            speed_bases.add(base)
+                    # Now process files
+                    for file_name in wav_files:
+                        # If this is an original file and a _speed version exists, skip it
+                        if ('_speed' not in file_name) and (file_name.replace('.wav','') in speed_bases):
+                            continue
+                        is_converted, is_transcribed = check_file_status(file_name, output_folder)
+                        file_path = os.path.join(audio_folder, file_name)
+                        if is_transcribed:
                             try:
-                                for file in os.listdir(audio_folder):
-                                    file_path = os.path.join(audio_folder, file)
-                                    if os.path.isfile(file_path):
-                                        os.remove(file_path)
-                                display_info("\nAll files in audio folder have been deleted.", "success")
+                                os.remove(file_path)
+                                display_info(f"[Auto] Deleted already processed file: {file_name}", "success")
                             except Exception as e:
-                                display_info(f"\nError deleting files: {str(e)}", "error")
+                                display_info(f"[Auto] Error deleting file {file_name}: {str(e)}", "error")
                         else:
-                            display_info("\nOperation cancelled.", "info")
-                        break
-                        
-                    elif choice == "5":
-                        display_info("\nExiting program.", "info")
-                        sys.exit(0)
-                        
+                            files_to_process.append(file_name)
+                    if files_to_process:
+                        process_files_parallel(files_to_process, audio_folder, output_folder)
                     else:
-                        display_info("\nInvalid choice. Please enter a number between 1 and 5.", "warning")
+                        display_info("[Auto] No files left to process.", "info")
+                    # Skip menu in auto mode
+                else:
+                    # Display file management options
+                    while True:
+                        display_info("\nFile Management Options:", "info")
+                        display_info("1. Process all files", "info")
+                        display_info("2. Select specific files to process", "info")
+                        display_info("3. Skip all files", "info")
+                        display_info("4. Delete all files in audio folder", "info")
+                        display_info("5. Exit", "info")
+                        
+                        choice = input("\nEnter your choice (1-5): ").strip()
+                        
+                        if choice == "1":
+                            # Process all files in parallel
+                            process_files_parallel(wav_files, audio_folder, output_folder)
+                            break
+                            
+                        elif choice == "2":
+                            # List all files with numbers
+                            display_info("\nAvailable files:", "info")
+                            for i, file in enumerate(wav_files, 1):
+                                display_info(f"{i}. {file}", "info")
+                            
+                            # Get user selection
+                            while True:
+                                selection = input("\nEnter file numbers to process (comma-separated) or 'all' for all files: ").strip()
+                                
+                                if selection.lower() == 'all':
+                                    selected_files = wav_files
+                                    break
+                                else:
+                                    try:
+                                        # Parse selected numbers
+                                        numbers = [int(n.strip()) for n in selection.split(',')]
+                                        # Validate numbers
+                                        if all(1 <= n <= len(wav_files) for n in numbers):
+                                            selected_files = [wav_files[n-1] for n in numbers]
+                                            break
+                                        else:
+                                            display_info("Invalid file numbers. Please try again.", "warning")
+                                    except ValueError:
+                                        display_info("Invalid input. Please enter numbers separated by commas.", "warning")
+                            
+                            # Process selected files
+                            if selected_files:
+                                process_files_parallel(selected_files, audio_folder, output_folder)
+                            break
+                            
+                        elif choice == "3":
+                            display_info("\nSkipping all files.", "info")
+                            break
+                            
+                        elif choice == "4":
+                            confirm = input("\nAre you sure you want to delete all files in the audio folder? (yes/no): ").strip().lower()
+                            if confirm == 'yes':
+                                try:
+                                    for file in os.listdir(audio_folder):
+                                        file_path = os.path.join(audio_folder, file)
+                                        if os.path.isfile(file_path):
+                                            os.remove(file_path)
+                                    display_info("\nAll files in audio folder have been deleted.", "success")
+                                except Exception as e:
+                                    display_info(f"\nError deleting files: {str(e)}", "error")
+                            else:
+                                display_info("\nOperation cancelled.", "info")
+                            break
+                            
+                        elif choice == "5":
+                            display_info("\nExiting program.", "info")
+                            sys.exit(0)
+                            
+                        else:
+                            display_info("\nInvalid choice. Please enter a number between 1 and 5.", "warning")
 
         # Clean up audio files after processing
         cleanup_audio_files()
