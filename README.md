@@ -189,8 +189,18 @@ For each processed audio file, the following files are generated in the `output`
 # First, install PyTorch with CUDA support
 !pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu118
 
-# Install other dependencies
-!pip install transformers==4.35.0
+# Install huggingface-hub first to resolve dependency conflicts
+!pip install huggingface-hub>=0.28.1
+
+# Install transformers and other dependencies
+!pip install transformers>=4.41.0
+!pip install sentence-transformers>=4.1.0
+!pip install accelerate>=1.7.0
+!pip install peft>=0.15.2
+!pip install gradio>=5.31.0
+!pip install diffusers>=0.33.1
+
+# Install remaining requirements
 !pip install -r requirements.txt
 ```
 
@@ -244,9 +254,20 @@ If you encounter any package compatibility issues:
 1. Restart the Colab runtime (Runtime > Restart runtime)
 2. Make sure you're using a GPU runtime (Runtime > Change runtime type > Hardware accelerator > GPU)
 3. Run the installation commands in order as shown above
-4. If issues persist, try clearing the Colab cache:
+4. If issues persist, try clearing the Colab cache and reinstalling:
 ```python
 !pip cache purge
-!pip uninstall -y torch torchvision torchaudio transformers
+!pip uninstall -y torch torchvision torchaudio transformers huggingface-hub sentence-transformers accelerate peft gradio diffusers
 ```
 Then reinstall the packages using the commands in step 3.
+
+5. If you still encounter issues, try installing packages one by one and check for errors:
+```python
+!pip install huggingface-hub>=0.28.1
+!pip install transformers>=4.41.0
+!pip install sentence-transformers>=4.1.0
+!pip install accelerate>=1.7.0
+!pip install peft>=0.15.2
+!pip install gradio>=5.31.0
+!pip install diffusers>=0.33.1
+```
