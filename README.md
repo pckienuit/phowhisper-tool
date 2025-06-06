@@ -171,3 +171,65 @@ For each processed audio file, the following files are generated in the `output`
 ## Contributing & Contact
 - Contribute code, report issues: create an issue or pull request on Github
 - Contact author: 23520804@gm.uit.edu.vn
+
+## Google Colab Setup
+
+### 1. Open Google Colab
+1. Go to [Google Colab](https://colab.research.google.com)
+2. Create a new notebook or open an existing one
+
+### 2. Clone the Repository
+```python
+!git clone [repository-url]
+%cd [repository-name]
+```
+
+### 3. Install Dependencies
+```python
+!pip install -r requirements.txt
+```
+
+### 4. Install FFmpeg
+```python
+!apt-get update
+!apt-get install -y ffmpeg
+```
+
+### 5. Configure Gemini API
+1. Go to [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
+2. Create an API key
+3. Add the API key to your Colab notebook:
+```python
+import os
+os.environ['GEMINI_API_KEY'] = 'your_api_key_here'
+```
+
+### 6. Create Required Folders
+```python
+!mkdir -p audio output
+```
+
+### 7. Upload Audio Files
+- Use the Colab file browser to upload audio files to the `audio` folder
+- Or use the following code to upload files:
+```python
+from google.colab import files
+uploaded = files.upload()
+# Move uploaded files to audio folder
+!mv *.mp3 *.wav *.mp4 audio/
+```
+
+### 8. Run the Tool
+```python
+!python phowhisper.py
+```
+
+### Notes for Colab Users
+- Colab provides free GPU access, but sessions are time-limited
+- For long audio files, consider using the speed optimization feature
+- Save your output files before the session ends
+- You can download processed files using:
+```python
+from google.colab import files
+files.download('output/your_file.txt')
+```
