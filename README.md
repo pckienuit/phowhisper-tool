@@ -186,6 +186,11 @@ For each processed audio file, the following files are generated in the `output`
 
 ### 3. Install Dependencies
 ```python
+# First, install PyTorch with CUDA support
+!pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu118
+
+# Install other dependencies
+!pip install transformers==4.35.0
 !pip install -r requirements.txt
 ```
 
@@ -233,3 +238,15 @@ uploaded = files.upload()
 from google.colab import files
 files.download('output/your_file.txt')
 ```
+
+### Troubleshooting
+If you encounter any package compatibility issues:
+1. Restart the Colab runtime (Runtime > Restart runtime)
+2. Make sure you're using a GPU runtime (Runtime > Change runtime type > Hardware accelerator > GPU)
+3. Run the installation commands in order as shown above
+4. If issues persist, try clearing the Colab cache:
+```python
+!pip cache purge
+!pip uninstall -y torch torchvision torchaudio transformers
+```
+Then reinstall the packages using the commands in step 3.
