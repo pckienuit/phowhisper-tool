@@ -1410,6 +1410,35 @@ def split_audio_optimized(audio_path: str, chunk_length_ms: int = 30000) -> List
         display_info(f"Error splitting audio: {str(e)}", "error")
         return []
 
+def get_youtube_urls() -> list[str]:
+    """
+    Get multiple YouTube URLs from user input until they confirm.
+    
+    Returns:
+        list[str]: List of valid YouTube URLs
+    """
+    urls = []
+    display_info("\nEnter YouTube URLs (one per line).", "info")
+    display_info("Enter 'done' when finished, or 'exit' to cancel.", "info")
+    
+    while True:
+        url = input("\nEnter URL (or 'done'/'exit'): ").strip()
+        
+        if url.lower() == 'exit':
+            return []
+        elif url.lower() == 'done':
+            if not urls:
+                display_info("No URLs provided. Please enter at least one URL.", "warning")
+                continue
+            break
+        elif "youtube.com" in url or "youtu.be" in url:
+            urls.append(convert_youtube_url(url))
+            display_info(f"Added URL: {url}", "success")
+        else:
+            display_info("Invalid YouTube URL. Please enter a valid YouTube URL.", "warning")
+    
+    return urls
+
 # Main execution
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PhoWhisper CLI")
@@ -1461,17 +1490,18 @@ if __name__ == "__main__":
     
             if not wav_files:
                 display_info("\nNo new files to process.", "warning")
-                youtube_url = input("\nPlease enter a YouTube URL (or press Enter to exit): ").strip()
+                youtube_urls = get_youtube_urls()
                 
-                if youtube_url and ("youtube.com" in youtube_url or "youtu.be" in youtube_url):
-                    youtube_url = convert_youtube_url(youtube_url)
-                    display_info(f"\nProcessing YouTube URL: {youtube_url}", "info")
-                    audio_path = download_youtube_audio_ytdlp(youtube_url, audio_folder)
-                    if audio_path:
-                        audio_name = os.path.basename(audio_path)
-                        process_single_file(audio_path, audio_name, output_folder)
+                if youtube_urls:
+                    display_info(f"\nProcessing {len(youtube_urls)} YouTube URLs...", "info")
+                    for url in youtube_urls:
+                        display_info(f"\nProcessing URL: {url}", "info")
+                        audio_path = download_youtube_audio_ytdlp(url, audio_folder)
+                        if audio_path:
+                            audio_name = os.path.basename(audio_path)
+                            process_single_file(audio_path, audio_name, output_folder)
                 else:
-                    display_info("\nNo valid YouTube URL provided. Exiting...", "warning")
+                    display_info("\nNo YouTube URLs provided. Exiting...", "warning")
                 sys.exit(0)
             else:
                 display_info(f"\nFound {len(wav_files)} files to process.", "info")
