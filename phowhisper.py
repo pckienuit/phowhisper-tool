@@ -121,6 +121,10 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
+# Suppress torchvision image extension warnings
+warnings.filterwarnings('ignore', message='Failed to load image Python extension')
+warnings.filterwarnings('ignore', module='torchvision.io.image')
+
 def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
     """
     Split audio into optimized chunks at silent or very quiet points.
