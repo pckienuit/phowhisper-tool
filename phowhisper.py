@@ -25,6 +25,8 @@ import tempfile
 import time
 import argparse
 from urllib.parse import urlparse, parse_qs
+from scipy import signal
+from scipy.io import wavfile
 
 # Load environment variables
 load_dotenv()
@@ -127,9 +129,397 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 warnings.filterwarnings('ignore', message='Failed to load image Python extension')
 warnings.filterwarnings('ignore', module='torchvision.io.image')
 
+def analyze_background_noise(audio: AudioSegment) -> dict:
+    """
+    Analyze background noise levels in audio to determine optimal chunking strategy.
+    
+    Args:
+        audio (AudioSegment): Audio to analyze
+        
+    Returns:
+        dict: Noise analysis results
+    """
+    try:
+        # Convert to numpy array for analysis
+        samples = np.array(audio.get_array_of_samples())
+        if audio.channels == 2:
+            samples = samples.reshape((-1, 2))
+            # Use left channel for analysis
+            samples = samples[:, 0]
+        
+        # Normalize samples
+        samples = samples.astype(np.float32) / 32768.0
+        
+        # Calculate RMS (Root Mean Square) - measure of signal strength
+        rms = np.sqrt(np.mean(samples**2))
+        
+        # Calculate noise floor by analyzing quieter segments
+        # Sort samples and take bottom 20% as potential noise floor
+        sorted_abs_samples = np.sort(np.abs(samples))
+        noise_floor_samples = sorted_abs_samples[:int(len(sorted_abs_samples) * 0.2)]
+        noise_floor = np.mean(noise_floor_samples)
+        
+        # Calculate signal-to-noise ratio
+        signal_power = rms**2
+        noise_power = noise_floor**2
+        snr = 10 * np.log10(signal_power / noise_power) if noise_power > 0 else 50
+        
+        # Analyze spectral characteristics
+        # Take a sample from middle of audio for analysis
+        sample_start = len(samples) // 4
+        sample_end = sample_start + min(audio.frame_rate * 5, len(samples) - sample_start)  # 5 seconds max
+        sample_segment = samples[sample_start:sample_end]
+        
+        # Perform FFT analysis
+        fft = np.fft.fft(sample_segment)
+        freqs = np.fft.fftfreq(len(sample_segment), 1/audio.frame_rate)
+        magnitude = np.abs(fft)
+        
+        # Analyze low frequency content (potential noise)
+        low_freq_limit = 100  # Hz
+        low_freq_mask = (freqs >= 0) & (freqs <= low_freq_limit)
+        low_freq_energy = np.sum(magnitude[low_freq_mask])
+        total_energy = np.sum(magnitude[freqs >= 0])
+        low_freq_ratio = low_freq_energy / total_energy if total_energy > 0 else 0
+        
+        # Determine noise characteristics
+        noise_level = 'low'
+        has_excessive_noise = False
+        suggested_chunk_size = 60000  # Default 60 seconds
+        
+        # Classification based on multiple factors
+        if snr < 10:  # Very poor SNR
+            noise_level = 'very_high'
+            has_excessive_noise = True
+            suggested_chunk_size = 30000  # 30 seconds
+        elif snr < 15:  # Poor SNR
+            noise_level = 'high'
+            has_excessive_noise = True
+            suggested_chunk_size = 30000  # 30 seconds
+        elif snr < 20:  # Moderate SNR
+            noise_level = 'moderate'
+            has_excessive_noise = False
+            suggested_chunk_size = 45000  # 45 seconds
+        elif low_freq_ratio > 0.3:  # High low-frequency content (potential AC hum, rumble)
+            noise_level = 'moderate'
+            has_excessive_noise = True
+            suggested_chunk_size = 30000  # 30 seconds
+        elif audio.dBFS < -50:  # Very quiet audio (might have relative noise issues)
+            noise_level = 'moderate'
+            has_excessive_noise = True
+            suggested_chunk_size = 30000  # 30 seconds
+        
+        return {
+            'noise_level': noise_level,
+            'has_excessive_noise': has_excessive_noise,
+            'snr_db': snr,
+            'noise_floor': noise_floor,
+            'rms_level': rms,
+            'low_freq_ratio': low_freq_ratio,
+            'suggested_chunk_size': suggested_chunk_size,
+            'noise_ratio': 1.0 - min(snr / 30.0, 1.0)  # Normalize SNR to 0-1 scale
+        }
+        
+    except Exception as e:
+        display_info(f"Error analyzing background noise: {e}", "warning")
+        return {
+            'noise_level': 'unknown',
+            'has_excessive_noise': False,
+            'snr_db': 20.0,
+            'noise_floor': 0.01,
+            'rms_level': 0.1,
+            'low_freq_ratio': 0.1,
+            'suggested_chunk_size': 60000,
+            'noise_ratio': 0.3
+        }
+
+def analyze_audio_characteristics(audio: AudioSegment) -> dict:
+    """Analyze audio characteristics to optimize chunking strategy."""
+    try:
+        stats = {
+            'length_ms': len(audio),
+            'length_seconds': len(audio) / 1000,
+            'dBFS': audio.dBFS,
+            'max_dBFS': audio.max_dBFS,
+            'channels': audio.channels,
+            'frame_rate': audio.frame_rate,
+            'is_quiet': audio.dBFS < -40,
+            'is_very_quiet': audio.dBFS < -60,
+            'dynamic_range': audio.max_dBFS - audio.dBFS if audio.dBFS is not None else 0
+        }
+        
+        # Enhanced noise analysis
+        noise_analysis = analyze_background_noise(audio)
+        stats.update(noise_analysis)
+        
+        # Simple silence analysis using dBFS threshold
+        try:
+            from pydub.silence import detect_silence
+            silent_ranges = detect_silence(
+                audio, 
+                min_silence_len=500,  # 0.5 seconds
+                silence_thresh=audio.dBFS-10  # 10dB below average
+            )
+            stats['silence_count'] = len(silent_ranges)
+            stats['has_natural_breaks'] = len(silent_ranges) > 0
+        except ImportError:
+            # Fallback if silence detection not available
+            stats['silence_count'] = 0
+            stats['has_natural_breaks'] = False
+        
+        return stats
+    except Exception as e:
+        display_info(f"Error analyzing audio: {e}", "warning")
+        return {
+            'length_ms': len(audio),
+            'length_seconds': len(audio) / 1000,
+            'dBFS': audio.dBFS if hasattr(audio, 'dBFS') else -30,
+            'max_dBFS': audio.max_dBFS if hasattr(audio, 'max_dBFS') else -20,
+            'channels': audio.channels,
+            'frame_rate': audio.frame_rate,
+            'is_quiet': True,
+            'is_very_quiet': True,
+            'dynamic_range': 0,
+            'silence_count': 0,
+            'has_natural_breaks': False,
+            'noise_level': 'unknown',
+            'has_excessive_noise': False,
+            'snr_db': 20.0,
+            'suggested_chunk_size': 30000,
+            'noise_ratio': 0.3
+        }
+
+
+def reduce_noise_spectral_subtraction(audio_segment, noise_factor=2.0):
+    """
+    Apply spectral subtraction noise reduction
+    """
+    try:
+        # Convert to numpy array
+        samples = np.array(audio_segment.get_array_of_samples())
+        
+        if audio_segment.channels == 2:
+            samples = samples.reshape((-1, 2))
+            # Process each channel separately
+            processed_channels = []
+            for channel in range(2):
+                channel_data = samples[:, channel]
+                processed_channel = _spectral_subtract_channel(channel_data, audio_segment.frame_rate, noise_factor)
+                processed_channels.append(processed_channel)
+            
+            # Combine channels
+            processed_samples = np.column_stack(processed_channels).flatten()
+        else:
+            processed_samples = _spectral_subtract_channel(samples, audio_segment.frame_rate, noise_factor)
+        
+        # Convert back to audio segment
+        processed_samples = processed_samples.astype(np.int16)
+        processed_audio = AudioSegment(
+            processed_samples.tobytes(),
+            frame_rate=audio_segment.frame_rate,
+            sample_width=audio_segment.sample_width,
+            channels=audio_segment.channels
+        )
+        
+        return processed_audio
+        
+    except Exception as e:
+        display_info(f"Error in spectral subtraction: {e}", "warning")
+        return audio_segment
+
+
+def _spectral_subtract_channel(samples, sample_rate, noise_factor):
+    """
+    Apply spectral subtraction to a single channel
+    """
+    try:
+        # Estimate noise from the first 0.5 seconds (assuming it's relatively quiet)
+        noise_duration = min(int(0.5 * sample_rate), len(samples) // 4)
+        noise_sample = samples[:noise_duration]
+        
+        # Calculate noise spectrum
+        noise_fft = np.fft.fft(noise_sample)
+        noise_magnitude = np.abs(noise_fft)
+        
+        # Process audio in overlapping windows
+        window_size = 2048
+        hop_size = window_size // 2
+        processed_samples = np.zeros_like(samples)
+        
+        for i in range(0, len(samples) - window_size, hop_size):
+            window = samples[i:i + window_size]
+            
+            # Apply window function
+            windowed = window * np.hanning(len(window))
+            
+            # FFT
+            window_fft = np.fft.fft(windowed)
+            window_magnitude = np.abs(window_fft)
+            window_phase = np.angle(window_fft)
+            
+            # Spectral subtraction
+            # Resize noise_magnitude to match window size
+            if len(noise_magnitude) != len(window_magnitude):
+                noise_interp = np.interp(
+                    np.linspace(0, 1, len(window_magnitude)),
+                    np.linspace(0, 1, len(noise_magnitude)),
+                    noise_magnitude
+                )
+            else:
+                noise_interp = noise_magnitude
+            
+            # Subtract noise spectrum
+            clean_magnitude = window_magnitude - noise_factor * noise_interp
+            
+            # Ensure magnitude doesn't go negative
+            clean_magnitude = np.maximum(clean_magnitude, 0.1 * window_magnitude)
+            
+            # Reconstruct signal
+            clean_fft = clean_magnitude * np.exp(1j * window_phase)
+            clean_window = np.real(np.fft.ifft(clean_fft))
+            
+            # Overlap-add
+            processed_samples[i:i + window_size] += clean_window
+        
+        return processed_samples
+        
+    except Exception as e:
+        display_info(f"Error in channel spectral subtraction: {e}", "warning")
+        return samples
+
+
+def apply_high_pass_filter(audio_segment, cutoff_freq=80):
+    """
+    Apply high-pass filter to remove low-frequency noise
+    """
+    try:
+        # Convert to numpy array
+        samples = np.array(audio_segment.get_array_of_samples())
+        sample_rate = audio_segment.frame_rate
+        
+        if audio_segment.channels == 2:
+            samples = samples.reshape((-1, 2))
+            # Process each channel
+            processed_channels = []
+            for channel in range(2):
+                channel_data = samples[:, channel]
+                filtered = _apply_highpass_channel(channel_data, sample_rate, cutoff_freq)
+                processed_channels.append(filtered)
+            processed_samples = np.column_stack(processed_channels).flatten()
+        else:
+            processed_samples = _apply_highpass_channel(samples, sample_rate, cutoff_freq)
+        
+        # Convert back to audio segment
+        processed_samples = processed_samples.astype(np.int16)
+        processed_audio = AudioSegment(
+            processed_samples.tobytes(),
+            frame_rate=audio_segment.frame_rate,
+            sample_width=audio_segment.sample_width,
+            channels=audio_segment.channels
+        )
+        
+        return processed_audio
+        
+    except Exception as e:
+        display_info(f"Error in high-pass filter: {e}", "warning")
+        return audio_segment
+
+
+def _apply_highpass_channel(samples, sample_rate, cutoff_freq):
+    """
+    Apply high-pass filter to a single channel
+    """
+    try:
+        # Design Butterworth high-pass filter
+        nyquist = sample_rate / 2
+        normalized_cutoff = cutoff_freq / nyquist
+        
+        # Ensure cutoff frequency is valid
+        if normalized_cutoff >= 1.0:
+            normalized_cutoff = 0.9
+        
+        b, a = signal.butter(4, normalized_cutoff, btype='high')
+        
+        # Apply filter
+        filtered_samples = signal.filtfilt(b, a, samples.astype(float))
+        
+        return filtered_samples.astype(np.int16)
+        
+    except Exception as e:
+        display_info(f"Error in channel high-pass filter: {e}", "warning")
+        return samples
+
+
+def reduce_noise_adaptive(audio_segment, reduction_strength=0.5):
+    """
+    Apply adaptive noise reduction based on audio characteristics
+    """
+    try:
+        # Analyze audio to determine best noise reduction approach
+        stats = analyze_audio_characteristics(audio_segment)
+        
+        processed_audio = audio_segment
+        
+        # Apply high-pass filter for low-frequency noise
+        if stats['dBFS'] < -30:  # Quiet audio, more aggressive filtering
+            processed_audio = apply_high_pass_filter(processed_audio, cutoff_freq=100)
+        else:
+            processed_audio = apply_high_pass_filter(processed_audio, cutoff_freq=80)
+        
+        # Apply spectral subtraction for general noise
+        noise_factor = 1.5 + reduction_strength
+        processed_audio = reduce_noise_spectral_subtraction(processed_audio, noise_factor)
+        
+        # Normalize volume after noise reduction
+        processed_audio = normalize_audio(processed_audio)
+        
+        return processed_audio
+        
+    except Exception as e:
+        display_info(f"Error in adaptive noise reduction: {e}", "warning")
+        return audio_segment
+
+
+def preprocess_audio_with_noise_reduction(audio_path, noise_reduction=True, reduction_strength=0.5):
+    """
+    Preprocess audio with optional noise reduction
+    
+    Args:
+        audio_path: Path to audio file
+        noise_reduction: Whether to apply noise reduction
+        reduction_strength: Strength of noise reduction (0.0 to 1.0)
+    
+    Returns:
+        Path to processed audio file
+    """
+    try:
+        if not noise_reduction:
+            return audio_path
+        
+        display_info("Applying noise reduction preprocessing...", "info")
+        
+        # Load audio
+        audio = AudioSegment.from_file(audio_path)
+        
+        # Apply noise reduction
+        processed_audio = reduce_noise_adaptive(audio, reduction_strength)
+        
+        # Save processed audio to temporary file
+        processed_path = audio_path.replace('.', '_denoised.')
+        processed_audio.export(processed_path, format="wav")
+        
+        display_info(f"Noise reduction applied, saved to: {processed_path}", "success")
+        return processed_path
+        
+    except Exception as e:
+        display_info(f"Error in noise reduction preprocessing: {e}", "warning")
+        return audio_path
+
+
 def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
     """
-    Split audio into optimized chunks at silent or very quiet points.
+    Split audio into optimized chunks with intelligent analysis.
+    Automatically uses 30s chunks for noisy audio.
     Returns paths to temporary files containing the chunks.
     """
     try:
@@ -138,7 +528,47 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
         audio = normalize_audio(audio)
         temp_files = []
         
-        display_info(f"\nSplitting audio into {chunk_length_ms/1000:.0f}s chunks...", "info")
+        # Analyze audio characteristics first
+        audio_stats = analyze_audio_characteristics(audio)
+        
+        # Determine optimal chunk size based on noise analysis
+        if audio_stats.get('has_excessive_noise', False):
+            optimal_chunk_size = 30000  # Force 30s for noisy audio
+            display_info(f"🔊 High noise detected (SNR: {audio_stats.get('snr_db', 0):.1f}dB, Level: {audio_stats.get('noise_level', 'unknown')})", "warning")
+            display_info("📏 Using 30-second chunks for better noise handling", "info")
+        else:
+            optimal_chunk_size = audio_stats.get('suggested_chunk_size', chunk_length_ms)
+            display_info(f"🔉 Normal audio quality (SNR: {audio_stats.get('snr_db', 20):.1f}dB, Level: {audio_stats.get('noise_level', 'low')})", "info")
+        
+        # Override with suggested chunk size
+        chunk_length_ms = optimal_chunk_size
+        
+        display_info(f"\nAnalyzing audio: {audio_stats['length_seconds']:.1f}s, {audio_stats['dBFS']:.1f}dB avg, {audio_stats['max_dBFS']:.1f}dB peak", "info")
+        
+        if audio_stats['is_very_quiet']:
+            display_info("Audio is very quiet, using lenient chunking criteria", "info")
+        elif audio_stats['is_quiet']:
+            display_info("Audio is quiet, adjusting chunking thresholds", "info")
+        
+        display_info(f"Splitting audio into {chunk_length_ms/1000:.0f}s chunks...", "info")
+        
+        # Adjust thresholds based on audio characteristics
+        if audio_stats['is_very_quiet']:
+            min_silence_threshold = -70  # Very lenient for quiet audio
+            min_chunk_length = 3000      # Shorter minimum chunks
+        elif audio_stats['is_quiet']:
+            min_silence_threshold = -55  # More lenient
+            min_chunk_length = 4000      # Slightly shorter
+        else:
+            min_silence_threshold = -40  # Standard threshold
+            min_chunk_length = 5000      # Standard minimum
+        
+        # For noisy audio, be more aggressive with chunking
+        if audio_stats.get('has_excessive_noise', False):
+            min_silence_threshold = -35  # Less strict silence requirement
+            min_chunk_length = 3000      # Shorter chunks to isolate noise
+        
+        display_info(f"Using silence threshold: {min_silence_threshold}dB, min chunk: {min_chunk_length/1000:.1f}s", "debug")
         
         # Calculate frame length for analysis (20ms frames for faster processing)
         frame_length = 20
@@ -147,15 +577,13 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
         # Find optimal split points
         split_points = []
         current_chunk_start = 0
-        min_silence_threshold = -40  # Adjusted threshold for better chunking
-        min_silence_duration = 500   # Increased minimum silence duration for more reliable splits
-        min_chunk_length = 5000      # Minimum chunk length in milliseconds
+        min_silence_duration = 500   # Minimum silence duration for splits
         
         # Process frames in batches for better performance
-        batch_size = 100  # Increased batch size for faster processing
+        batch_size = 100
         for i in range(0, len(frames), batch_size):
             batch = frames[i:i + batch_size]
-            batch_dBFS = [frame.dBFS for frame in batch]
+            batch_dBFS = [frame.dBFS for frame in batch if frame.dBFS is not None]
             
             for j, dBFS in enumerate(batch_dBFS):
                 frame_idx = i + j
@@ -168,8 +596,8 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
                     look_ahead = min(10, len(frames) - frame_idx - 1)
                     if look_ahead > 0:
                         next_frames = frames[frame_idx:frame_idx + look_ahead]
-                        next_dBFS = [frame.dBFS for frame in next_frames]
-                        if all(dB <= min_silence_threshold for dB in next_dBFS):
+                        next_dBFS = [frame.dBFS for frame in next_frames if frame.dBFS is not None]
+                        if next_dBFS and all(dB <= min_silence_threshold for dB in next_dBFS):
                             split_points.append(current_time)
                             current_chunk_start = current_time
         
@@ -184,33 +612,180 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
                 split_points.append(i)
             split_points.append(len(audio))
         
-        # Create chunks based on split points
+        # Ensure we have at least start and end points
+        if len(split_points) < 2:
+            split_points = [0, len(audio)]
+        
+        # Remove duplicates and sort
+        split_points = sorted(list(set(split_points)))
+        
+        display_info(f"Found {len(split_points)-1} potential chunks from split points", "debug")
+        
+        # Create chunks based on split points with 30s maximum enforcement
         chunk_count = 0
         for i in range(len(split_points) - 1):
             start = split_points[i]
             end = split_points[i + 1]
             chunk = audio[start:end]
             
-            # Only save chunks that are long enough and have audible sound
-            if len(chunk) >= min_chunk_length and chunk.dBFS > min_silence_threshold:
-                temp_file = f"temp_chunk_{chunk_count}.wav"
-                chunk.export(
-                    temp_file,
-                    format="wav",
-                    parameters=["-ac", "1", "-ar", "16000"]
-                )
-                temp_files.append(temp_file)
-                chunk_count += 1
-        
-        if not temp_files:
-            display_info("Warning: No valid chunks created. Using original audio file.", "warning")
-            temp_file = "temp_chunk_0.wav"
-            audio.export(
-                temp_file,
-                format="wav",
-                parameters=["-ac", "1", "-ar", "16000"]
+            chunk_duration = len(chunk) / 1000  # Duration in seconds
+            display_info(f"Evaluating chunk {i}: {chunk_duration:.1f}s, dBFS={chunk.dBFS:.1f}, max_dBFS={chunk.max_dBFS:.1f}", "debug")
+            
+            # Enforce 30-second maximum chunk length
+            if chunk_duration > 30.0:
+                display_info(f"📏 Chunk {i} too long ({chunk_duration:.1f}s), splitting into 30s segments", "warning")
+                # Split into 30-second sub-chunks
+                for sub_start in range(0, len(chunk), 30000):  # 30s = 30000ms
+                    sub_end = min(sub_start + 30000, len(chunk))
+                    sub_chunk = chunk[sub_start:sub_end]
+                    sub_duration = len(sub_chunk) / 1000
+                    
+                    # Apply validation to sub-chunk
+                    if len(sub_chunk) >= min_chunk_length:
+                        # More lenient audio level check
+                        chunk_audio_ok = (
+                            sub_chunk.dBFS > -80 or           # Very lenient dBFS threshold
+                            sub_chunk.max_dBFS > -60 or       # Check peak volume
+                            sub_duration >= 3.0              # Always accept if >= 3 seconds
+                        )
+                        
+                        if chunk_audio_ok:
+                            temp_file = f"temp_chunk_{chunk_count}.wav"
+                            try:
+                                sub_chunk.export(
+                                    temp_file,
+                                    format="wav",
+                                    parameters=["-ac", "1", "-ar", "16000"]
+                                )
+                                temp_files.append(temp_file)
+                                chunk_count += 1
+                                display_info(f"✓ Created sub-chunk {chunk_count}: {temp_file} ({sub_duration:.1f}s)", "debug")
+                            except Exception as e:
+                                display_info(f"Error exporting sub-chunk: {e}", "error")
+                continue
+            
+            # More flexible chunk validation for normal-sized chunks
+            chunk_length_ok = len(chunk) >= min_chunk_length
+            
+            # More lenient audio level check
+            chunk_audio_ok = (
+                chunk.dBFS > -80 or           # Very lenient dBFS threshold
+                chunk.max_dBFS > -60 or       # Check peak volume
+                chunk_duration >= 5.0        # Always accept if >= 5 seconds
             )
-            temp_files.append(temp_file)
+            
+            # Debug info for troubleshooting
+            display_info(f"Chunk {i}: length_ok={chunk_length_ok}, audio_ok={chunk_audio_ok}, duration={chunk_duration:.1f}s", "debug")
+            
+            # Save chunk if it meets criteria
+            if chunk_length_ok and chunk_audio_ok:
+                temp_file = f"temp_chunk_{chunk_count}.wav"
+                try:
+                    chunk.export(
+                        temp_file,
+                        format="wav",
+                        parameters=["-ac", "1", "-ar", "16000"]
+                    )
+                    temp_files.append(temp_file)
+                    chunk_count += 1
+                    display_info(f"✓ Created chunk {chunk_count}: {temp_file} ({chunk_duration:.1f}s)", "debug")
+                except Exception as e:
+                    display_info(f"Error exporting chunk {i}: {e}", "error")
+        
+        # If still no chunks, try even more lenient criteria
+        if not temp_files:
+            display_info("No chunks with strict criteria. Trying lenient validation...", "warning")
+            
+            for i in range(len(split_points) - 1):
+                start = split_points[i]
+                end = split_points[i + 1]
+                chunk = audio[start:end]
+                
+                chunk_duration = len(chunk) / 1000
+                
+                # Enforce 30s maximum chunk length
+                if chunk_duration > 30:
+                    display_info(f"Chunk {i} too long ({chunk_duration:.1f}s), splitting to 30s max", "warning")
+                    # Split long chunk into 30s segments
+                    sub_chunks = []
+                    for sub_start in range(0, len(chunk), 30000):  # 30s = 30000ms
+                        sub_end = min(sub_start + 30000, len(chunk))
+                        sub_chunk = chunk[sub_start:sub_end]
+                        if len(sub_chunk) >= 2000:  # At least 2 seconds
+                            sub_chunks.append(sub_chunk)
+                    
+                    # Export sub-chunks
+                    for j, sub_chunk in enumerate(sub_chunks):
+                        if sub_chunk.dBFS > -100:  # Any audible content
+                            temp_file = f"temp_chunk_{chunk_count}.wav"
+                            try:
+                                sub_chunk.export(
+                                    temp_file,
+                                    format="wav",
+                                    parameters=["-ac", "1", "-ar", "16000"]
+                                )
+                                temp_files.append(temp_file)
+                                chunk_count += 1
+                                display_info(f"✓ Created sub-chunk {chunk_count}: {temp_file} ({len(sub_chunk)/1000:.1f}s)", "debug")
+                            except Exception as e:
+                                display_info(f"Error exporting sub-chunk {j}: {e}", "error")
+                else:
+                    # Very lenient criteria - any chunk > 2 seconds with any audible content
+                    if len(chunk) >= 2000 and chunk.dBFS > -100:  # Almost any audio
+                        temp_file = f"temp_chunk_{chunk_count}.wav"
+                        try:
+                            chunk.export(
+                                temp_file,
+                                format="wav",
+                                parameters=["-ac", "1", "-ar", "16000"]
+                            )
+                            temp_files.append(temp_file)
+                            chunk_count += 1
+                            display_info(f"✓ Created lenient chunk {chunk_count}: {temp_file} ({chunk_duration:.1f}s)", "debug")
+                        except Exception as e:
+                            display_info(f"Error exporting lenient chunk {i}: {e}", "error")
+        
+        # Final fallback: Force 30-second chunks if algorithm fails
+        if not temp_files:
+            display_info("⚠️  Warning: No valid chunks created with algorithm. Using 30-second fixed chunks.", "warning")
+            display_info(f"Audio stats: length={len(audio)/1000:.1f}s, dBFS={audio.dBFS:.1f}, max_dBFS={audio.max_dBFS:.1f}", "info")
+            display_info("📏 Falling back to 30-second chunk strategy for reliability", "info")
+            
+            # Create fixed 30-second chunks
+            chunk_size = 30000  # Fixed 30 seconds
+            
+            for start in range(0, len(audio), chunk_size):
+                end = min(start + chunk_size, len(audio))
+                chunk = audio[start:end]
+                
+                # Accept any chunk > 1 second
+                if len(chunk) > 1000:
+                    temp_file = f"temp_chunk_{len(temp_files)}.wav"
+                    try:
+                        chunk.export(
+                            temp_file,
+                            format="wav",
+                            parameters=["-ac", "1", "-ar", "16000"]
+                        )
+                        temp_files.append(temp_file)
+                        display_info(f"✓ Created 30s chunk: {temp_file} ({len(chunk)/1000:.1f}s)", "info")
+                    except Exception as e:
+                        display_info(f"Error creating 30s chunk: {e}", "error")
+            
+            # Final fallback if even forced chunks fail
+            if not temp_files:
+                display_info("All chunking methods failed. Using original file as single chunk.", "error")
+                temp_file = "temp_chunk_0.wav"
+                try:
+                    audio.export(
+                        temp_file,
+                        format="wav",
+                        parameters=["-ac", "1", "-ar", "16000"]
+                    )
+                    temp_files.append(temp_file)
+                except Exception as e:
+                    display_info(f"Critical error: Cannot export audio file: {e}", "error")
+                    raise Exception(f"Failed to process audio file: {e}")
         
         display_info(f"Created {len(temp_files)} audio chunks for sequential processing", "info")
         return temp_files
@@ -239,12 +814,16 @@ def process_chunk(chunk_path: str) -> str:
         display_info(f"\nError processing chunk {chunk_path}: {str(e)}", "error")
         return ""
 
-def transcribe_audio(audio_path: str, max_workers: int = None) -> str:
-    """Transcribe audio using optimized single-threaded processing."""
+def transcribe_audio(audio_path: str, max_workers: int = None, noise_reduction: bool = False, reduction_strength: float = 0.5) -> str:
+    """Transcribe audio using optimized single-threaded processing with optional noise reduction."""
     if not os.path.exists(audio_path):
         return "File not found"
     
     try:
+        # Apply noise reduction preprocessing if requested
+        if noise_reduction:
+            audio_path = preprocess_audio_with_noise_reduction(audio_path, noise_reduction, reduction_strength)
+        
         # Validate WAV file format
         audio = AudioSegment.from_file(audio_path)
         
@@ -602,7 +1181,7 @@ def convert_to_wav(input_folder: str, output_folder: str) -> list[str]:
             display_info(f"\nFile {file_name} has already been fully processed.", "info")
             # Still process the file to allow user interaction
             audio_path = os.path.join(input_folder, file_name)
-            process_single_file(audio_path, file_name, output_folder)
+            process_single_file(audio_path, file_name, output_folder, False, 0.5, False)
             continue
             
         file_path = os.path.join(input_folder, file_name)
@@ -1173,13 +1752,16 @@ def check_file_status(audio_name: str, output_folder: str) -> tuple[bool, bool]:
     
     return is_converted, is_transcribed
 
-def process_single_file(audio_path: str, audio_name: str, output_folder: str) -> None:
+def process_single_file(audio_path: str, audio_name: str, output_folder: str, noise_reduction: bool = False, reduction_strength: float = 0.5, skip_speed_optimization: bool = False) -> None:
     """
     Process a single audio file without any interactive input.
     Args:
         audio_path (str): Path to the audio file
         audio_name (str): Name of the audio file
         output_folder (str): Path to the output folder
+        noise_reduction (bool): Whether to apply noise reduction
+        reduction_strength (float): Strength of noise reduction (0.0-1.0)
+        skip_speed_optimization (bool): Whether to skip speed optimization
     """
     is_converted, is_transcribed = check_file_status(audio_name, output_folder)
     base_name = os.path.splitext(audio_name)[0]
@@ -1199,8 +1781,10 @@ def process_single_file(audio_path: str, audio_name: str, output_folder: str) ->
         display_info(f"✓ Processed output saved to: {processed_file}", "success")
     else:
         display_info(f"\nProcessing new file: {audio_name}", "info")
-        # If file is already a _speed file, skip optimal speed detection
-        if '_speed' in audio_name:
+        # Skip speed optimization if requested or if file is already a _speed file
+        if skip_speed_optimization:
+            display_info("Speed optimization skipped by user request.", "info")
+        elif '_speed' in audio_name:
             display_info("File is a _speed file. Skipping optimal speed detection.", "info")
         else:
             audio = AudioSegment.from_file(audio_path)
@@ -1224,7 +1808,7 @@ def process_single_file(audio_path: str, audio_name: str, output_folder: str) ->
                         display_info(f"Error creating sped-up version: {str(e)}", "error")
                         display_info("Falling back to original speed", "warning")
         display_info("Transcribing audio...", "info")
-        output_text = transcribe_audio(audio_path)
+        output_text = transcribe_audio(audio_path, noise_reduction=noise_reduction, reduction_strength=reduction_strength)
         with open(transcript_file, "w", encoding="utf-8") as f:
             f.write(output_text)
         display_info(f"✓ Raw transcript saved to: {transcript_file}", "success")
@@ -1362,7 +1946,7 @@ def cleanup_temp_files() -> None:
     
     display_info("Temporary files cleanup completed", "success")
 
-def process_files_parallel(files_to_process: list[str], input_folder: str, output_folder: str, max_workers: int = None) -> None:
+def process_files_parallel(files_to_process: list[str], input_folder: str, output_folder: str, max_workers: int = None, noise_reduction: bool = False, reduction_strength: float = 0.5, skip_speed_optimization: bool = False) -> None:
     """
     Process multiple files sequentially for better stability and resource management.
     
@@ -1371,6 +1955,9 @@ def process_files_parallel(files_to_process: list[str], input_folder: str, outpu
         input_folder (str): Input folder path
         output_folder (str): Output folder path
         max_workers (int): Ignored in single-threaded mode (kept for compatibility)
+        noise_reduction (bool): Whether to apply noise reduction
+        reduction_strength (float): Strength of noise reduction (0.0-1.0)
+        skip_speed_optimization (bool): Whether to skip speed optimization
     """
     display_info(f"\nProcessing {len(files_to_process)} files sequentially", "info")
     
@@ -1381,7 +1968,7 @@ def process_files_parallel(files_to_process: list[str], input_folder: str, outpu
             display_info(f"\n[{i+1}/{len(files_to_process)}] Processing: {file_name}", "info")
             
             # Process single file
-            process_single_file(audio_path, file_name, output_folder)
+            process_single_file(audio_path, file_name, output_folder, noise_reduction, reduction_strength, skip_speed_optimization)
             
             # Clear memory after each file
             if torch.cuda.is_available():
@@ -1661,6 +2248,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PhoWhisper CLI")
     parser.add_argument('--mode', choices=['auto', 'manual'], default='auto', help='Device selection mode: auto/manual (default: auto)')
     parser.add_argument('--device', choices=['cpu', 'cuda'], default=None, help='Device to use if manual')
+    parser.add_argument('--noise-reduction', action='store_true', help='Apply noise reduction preprocessing')
+    parser.add_argument('--reduction-strength', type=float, default=0.5, help='Noise reduction strength (0.0-1.0, default: 0.5)')
+    parser.add_argument('--skip-speed', action='store_true', help='Skip speed optimization for faster processing')
     args, unknown = parser.parse_known_args()
 
     audio_folder = "audio"
@@ -1701,7 +2291,7 @@ if __name__ == "__main__":
                 audio_path = download_from_url(input_url, audio_folder)
                 if audio_path:
                     audio_name = os.path.basename(audio_path)
-                    process_single_file(audio_path, audio_name, output_folder)
+                    process_single_file(audio_path, audio_name, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed)
                 else:
                     display_info("Failed to download from URL", "error")
                     sys.exit(1)
@@ -1723,7 +2313,7 @@ if __name__ == "__main__":
                         audio_path = download_from_url(url, audio_folder)
                         if audio_path:
                             audio_name = os.path.basename(audio_path)
-                            process_single_file(audio_path, audio_name, output_folder)
+                            process_single_file(audio_path, audio_name, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed)
                         else:
                             display_info(f"Failed to download from URL: {url}", "error")
                 else:
@@ -1757,7 +2347,7 @@ if __name__ == "__main__":
                         else:
                             files_to_process.append(file_name)
                     if files_to_process:
-                        process_files_parallel(files_to_process, audio_folder, output_folder)
+                        process_files_parallel(files_to_process, audio_folder, output_folder, None, args.noise_reduction, args.reduction_strength, args.skip_speed)
                     else:
                         display_info("[Auto] No files left to process.", "info")
                     # Skip menu in auto mode
@@ -1775,7 +2365,7 @@ if __name__ == "__main__":
                         
                         if choice == "1":
                             # Process all files in parallel
-                            process_files_parallel(wav_files, audio_folder, output_folder)
+                            process_files_parallel(wav_files, audio_folder, output_folder, None, args.noise_reduction, args.reduction_strength, args.skip_speed)
                             break
                             
                         elif choice == "2":
@@ -1806,7 +2396,7 @@ if __name__ == "__main__":
                             
                             # Process selected files
                             if selected_files:
-                                process_files_parallel(selected_files, audio_folder, output_folder)
+                                process_files_parallel(selected_files, audio_folder, output_folder, None, args.noise_reduction, args.reduction_strength, args.skip_speed)
                             break
                             
                         elif choice == "3":
