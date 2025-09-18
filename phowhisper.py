@@ -5,7 +5,8 @@ from pydub.utils import make_chunks
 import torch
 import sys
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
+# Removed ThreadPoolExecutor for single-threaded processing
+from concurrent.futures import as_completed  # Keep for compatibility
 import gc
 from typing import List, Dict
 import numpy as np
@@ -98,7 +99,7 @@ def select_device(mode: str = None, cli_device: str = None) -> str:
 selected_device = select_device()
 transcriber = pipeline(
     "automatic-speech-recognition",
-    model="vinai/PhoWhisper-medium",
+    model="vinai/PhoWhisper-large",
     device=selected_device,
     return_timestamps=True,
     framework="pt",
@@ -136,7 +137,7 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
         audio = normalize_audio(audio)
         temp_files = []
         
-        display_info("\nSplitting audio into chunks...", "info")
+        display_info(f"\nSplitting audio into {chunk_length_ms/1000:.0f}s chunks...", "info")
         
         # Calculate frame length for analysis (20ms frames for faster processing)
         frame_length = 20
@@ -210,7 +211,7 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
             )
             temp_files.append(temp_file)
         
-        display_info(f"Created {len(temp_files)} audio chunks", "info")
+        display_info(f"Created {len(temp_files)} audio chunks for sequential processing", "info")
         return temp_files
         
     except Exception as e:
@@ -228,44 +229,17 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
             raise Exception(f"Failed to process audio file: {str(e)}")
 
 def process_chunk(chunk_path: str) -> str:
-    """Process a single audio chunk with optimized settings."""
+    """Process a single audio chunk with optimized settings for single-threaded processing."""
     try:
-        # Use cached transcriber instance with optimized settings
-        if not hasattr(process_chunk, 'transcriber'):
-            process_chunk.transcriber = pipeline(
-                "automatic-speech-recognition",
-                model="vinai/PhoWhisper-medium",
-                device=transcriber.device,  # Use the same device as the main transcriber
-                return_timestamps=True,
-                framework="pt",
-                torch_dtype=torch.float16 if transcriber.device == "cuda" else torch.float32,  # Use half precision only for GPU
-                model_kwargs={
-                    "use_cache": True,
-                    "low_cpu_mem_usage": True
-                }
-            )
-            # Enable model optimization
-            if hasattr(process_chunk.transcriber.model, 'enable_model_cpu_offload'):
-                process_chunk.transcriber.model.enable_model_cpu_offload()
-            
-            # Optimize model for inference
-            if transcriber.device == "cuda":
-                process_chunk.transcriber.model = process_chunk.transcriber.model.eval()
-                with torch.cuda.amp.autocast():
-                    process_chunk.transcriber.model = torch.compile(process_chunk.transcriber.model)
-            else:
-                process_chunk.transcriber.model = process_chunk.transcriber.model.eval()
-                process_chunk.transcriber.model = torch.compile(process_chunk.transcriber.model)
-        
-        # Process the chunk
-        result = process_chunk.transcriber(chunk_path)
+        # Use the global transcriber instance for better efficiency
+        result = transcriber(chunk_path)
         return result['text']
     except Exception as e:
         display_info(f"\nError processing chunk {chunk_path}: {str(e)}", "error")
         return ""
 
 def transcribe_audio(audio_path: str, max_workers: int = None) -> str:
-    """Transcribe audio using optimized parallel processing."""
+    """Transcribe audio using optimized single-threaded processing."""
     if not os.path.exists(audio_path):
         return "File not found"
     
@@ -286,37 +260,33 @@ def transcribe_audio(audio_path: str, max_workers: int = None) -> str:
             audio_path = temp_path
         
         if len(audio) > 30000:  # If audio is longer than 30 seconds
-            temp_files = split_audio(audio_path)
+            # Use larger chunks for better efficiency in single-threaded mode
+            chunk_length = 60000 if torch.cuda.is_available() else 45000  # 60s for GPU, 45s for CPU
+            temp_files = split_audio(audio_path, chunk_length)
             transcriptions = []
             
-            display_info("\nTranscribing audio chunks...", "info")
+            display_info("\nTranscribing audio chunks sequentially...", "info")
             
-            # Determine optimal number of workers
-            if max_workers is None:
-                if torch.cuda.is_available():
-                    max_workers = torch.cuda.device_count()
-                else:
-                    max_workers = min(os.cpu_count() or 4, 4)  # Limit CPU workers to prevent overload
-            
-            # Process chunks in parallel with optimized settings
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(process_chunk, temp_file): temp_file 
-                          for temp_file in temp_files}
-                
-                # Wait for all futures to complete
-                for future in tqdm(as_completed(futures), total=len(futures), desc="Processing chunks"):
-                    chunk_path = futures[future]
-                    try:
-                        text = future.result()
+            # Process chunks sequentially with progress bar
+            for i, temp_file in enumerate(tqdm(temp_files, desc="Processing chunks", unit="chunk")):
+                try:
+                    # Process chunk
+                    text = process_chunk(temp_file)
+                    if text:
                         transcriptions.append(text)
-                    except Exception as e:
-                        display_info(f"\nError processing {chunk_path}: {str(e)}", "error")
-                    finally:
-                        # Clean up temporary file
-                        if os.path.exists(chunk_path):
-                            os.remove(chunk_path)
+                    
+                    # Clear CUDA cache after each chunk to prevent memory buildup
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    
+                except Exception as e:
+                    display_info(f"\nError processing chunk {i+1}: {str(e)}", "error")
+                finally:
+                    # Clean up temporary file
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
             
-            # Clear CUDA cache after processing
+            # Final cleanup
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 gc.collect()  # Add garbage collection
@@ -1200,32 +1170,37 @@ def cleanup_temp_files() -> None:
 
 def process_files_parallel(files_to_process: list[str], input_folder: str, output_folder: str, max_workers: int = None) -> None:
     """
-    Process multiple files in parallel using ThreadPoolExecutor.
+    Process multiple files sequentially for better stability and resource management.
     
     Args:
         files_to_process (list[str]): List of files to process
         input_folder (str): Input folder path
         output_folder (str): Output folder path
-        max_workers (int): Maximum number of worker threads
+        max_workers (int): Ignored in single-threaded mode (kept for compatibility)
     """
-    if not max_workers:
-        max_workers = min(os.cpu_count() or 4, 4)  # Limit to 4 workers by default
+    display_info(f"\nProcessing {len(files_to_process)} files sequentially", "info")
     
-    display_info(f"\nProcessing {len(files_to_process)} files in parallel using {max_workers} workers", "info")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = []
-        for file_name in files_to_process:
+    # Process files one by one with progress tracking
+    for i, file_name in enumerate(tqdm(files_to_process, desc="Processing files", unit="file")):
+        try:
             audio_path = os.path.join(input_folder, file_name)
-            future = executor.submit(process_single_file, audio_path, file_name, output_folder)
-            futures.append(future)
-        
-        # Wait for all tasks to complete
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing files"):
-            try:
-                future.result()
-            except Exception as e:
-                display_info(f"Error processing file: {str(e)}", "error")
+            display_info(f"\n[{i+1}/{len(files_to_process)}] Processing: {file_name}", "info")
+            
+            # Process single file
+            process_single_file(audio_path, file_name, output_folder)
+            
+            # Clear memory after each file
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            
+            display_info(f"✓ Completed: {file_name}", "success")
+            
+        except Exception as e:
+            display_info(f"✗ Error processing {file_name}: {str(e)}", "error")
+            continue  # Continue with next file
+    
+    display_info(f"\n✅ Completed processing all {len(files_to_process)} files", "success")
 
 def optimize_memory_usage():
     """
@@ -1244,30 +1219,34 @@ def optimize_memory_usage():
 
 def optimize_model_for_inference():
     """
-    Optimize the model for faster inference.
+    Optimize the model for faster inference in single-threaded mode.
     """
     global transcriber
     
-    if transcriber.device == "cuda":
-        # Enable CUDA optimizations
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cudnn.deterministic = False
-        
-        # Move model to GPU and optimize
-        transcriber.model = transcriber.model.cuda()
-        transcriber.model = transcriber.model.eval()
-        
-        # Enable model optimization
-        if hasattr(transcriber.model, 'enable_model_cpu_offload'):
-            transcriber.model.enable_model_cpu_offload()
-        
-        # Use mixed precision for faster inference
-        with torch.cuda.amp.autocast():
-            transcriber.model = torch.compile(transcriber.model)
-    else:
-        # CPU optimizations
-        transcriber.model = transcriber.model.eval()
-        transcriber.model = torch.compile(transcriber.model)
+    try:
+        if transcriber.device == "cuda":
+            # Enable CUDA optimizations
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.deterministic = False
+            
+            # Move model to GPU and optimize
+            transcriber.model = transcriber.model.cuda()
+            transcriber.model = transcriber.model.eval()
+            
+            # Enable model optimization for single-threaded processing
+            if hasattr(transcriber.model, 'enable_model_cpu_offload'):
+                transcriber.model.enable_model_cpu_offload()
+            
+            display_info("GPU model optimized for single-threaded inference", "info")
+        else:
+            # CPU optimizations
+            transcriber.model = transcriber.model.eval()
+            # Set optimal thread count for CPU inference
+            torch.set_num_threads(min(4, torch.get_num_threads()))
+            display_info("CPU model optimized for single-threaded inference", "info")
+            
+    except Exception as e:
+        display_info(f"Warning: Model optimization failed: {str(e)}", "warning")
 
 def optimize_audio_processing(audio: AudioSegment) -> AudioSegment:
     """
