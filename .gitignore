@@ -1,24 +1,65 @@
-/tempCodeRunnerFile.py
-/test_gemini.py
-/__pycache__
-/temp_chunk*
-/output/*.txt
-/audio/*.wav
+# Python cache và temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-/*.wav
-.env
-test*
+# Audio files (except samples)
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
 *.mkv
 *.mp4
-*.wav
+temp_chunk*
 
-0.*
-1.*
-2.*
-3.*
-4.*
-5.*
-6.*
-7.*
-8.*
-9.*
+# Output files
+output/*.txt
+output/*.json
+
+# Environment và config
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Test files
+test_*.py
+*_test.py
+
+# Version directories
+[0-9]*.[0-9]*
+[0-9]*.[0-9]*.[0-9]*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tempCodeRunnerFile.py

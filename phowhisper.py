@@ -5,8 +5,6 @@ from pydub.utils import make_chunks
 import torch
 import sys
 import subprocess
-# Removed ThreadPoolExecutor for single-threaded processing
-from concurrent.futures import as_completed  # Keep for compatibility
 import gc
 from typing import List, Dict
 import numpy as np
@@ -21,12 +19,9 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 import random
 from difflib import SequenceMatcher
-import tempfile
 import time
 import argparse
-from urllib.parse import urlparse, parse_qs
 from scipy import signal
-from scipy.io import wavfile
 
 # Load environment variables
 load_dotenv()
@@ -54,6 +49,7 @@ def display_info(message: str, level: str = "info") -> None:
         print(f"\n⚠️  {message}")
     elif level == "error":
         print(f"\n❌ {message}")
+    # Skip debug messages to reduce noise
 
 def select_device(mode: str = None, cli_device: str = None) -> str:
     """
@@ -814,7 +810,7 @@ def process_chunk(chunk_path: str) -> str:
         display_info(f"\nError processing chunk {chunk_path}: {str(e)}", "error")
         return ""
 
-def transcribe_audio(audio_path: str, max_workers: int = None, noise_reduction: bool = False, reduction_strength: float = 0.5) -> str:
+def transcribe_audio(audio_path: str, noise_reduction: bool = False, reduction_strength: float = 0.5) -> str:
     """Transcribe audio using optimized single-threaded processing with optional noise reduction."""
     if not os.path.exists(audio_path):
         return "File not found"
@@ -1084,48 +1080,6 @@ def calculate_text_similarity(text1: str, text2: str) -> dict:
         },
         "average_similarity_score": average_similarity
     }
-
-def extract_random_segments(audio: AudioSegment, segment_lengths: list[int], num_segments: int = 3, min_dBFS: float = -50.0) -> list[tuple[AudioSegment, int]]:
-    """
-    Extract random segments of different lengths from the audio.
-    
-    Args:
-        audio (AudioSegment): The audio to extract from
-        segment_lengths (list[int]): List of segment lengths in milliseconds
-        num_segments (int): Number of segments to extract for each length
-        min_dBFS (float): Minimum audio level in dBFS to consider as valid audio
-        
-    Returns:
-        list[tuple[AudioSegment, int]]: List of (segment, start_time) tuples
-    """
-    segments = []
-    for length in segment_lengths:
-        # Calculate possible start positions
-        max_start = len(audio) - length
-        if max_start <= 0:
-            continue
-            
-        # Extract num_segments random segments
-        attempts = 0
-        max_attempts = num_segments * 10  # Allow more attempts to find valid segments
-        
-        while len(segments) < num_segments and attempts < max_attempts:
-            start_time = random.randint(0, max_start)
-            segment = audio[start_time:start_time + length]
-            
-            # Check if segment has actual audio content
-            if segment.dBFS > min_dBFS:
-                segments.append((segment, start_time))
-                display_info(f"Found valid segment at {start_time/1000:.1f}s with level {segment.dBFS:.1f} dBFS", "info")
-            else:
-                display_info(f"Skipping silent segment at {start_time/1000:.1f}s (level: {segment.dBFS:.1f} dBFS)", "info")
-            
-            attempts += 1
-            
-        if len(segments) < num_segments:
-            display_info(f"Warning: Could only find {len(segments)} valid segments of length {length/1000:.1f}s", "warning")
-            
-    return segments
 
 def track_temp_files(action: str, file_path: str = None) -> None:
     """
@@ -1946,7 +1900,7 @@ def cleanup_temp_files() -> None:
     
     display_info("Temporary files cleanup completed", "success")
 
-def process_files_parallel(files_to_process: list[str], input_folder: str, output_folder: str, max_workers: int = None, noise_reduction: bool = False, reduction_strength: float = 0.5, skip_speed_optimization: bool = False) -> None:
+def process_files_sequentially(files_to_process: list[str], input_folder: str, output_folder: str, noise_reduction: bool = False, reduction_strength: float = 0.5, skip_speed_optimization: bool = False) -> None:
     """
     Process multiple files sequentially for better stability and resource management.
     
@@ -1954,7 +1908,6 @@ def process_files_parallel(files_to_process: list[str], input_folder: str, outpu
         files_to_process (list[str]): List of files to process
         input_folder (str): Input folder path
         output_folder (str): Output folder path
-        max_workers (int): Ignored in single-threaded mode (kept for compatibility)
         noise_reduction (bool): Whether to apply noise reduction
         reduction_strength (float): Strength of noise reduction (0.0-1.0)
         skip_speed_optimization (bool): Whether to skip speed optimization
@@ -2061,119 +2014,6 @@ def optimize_audio_processing(audio: AudioSegment) -> AudioSegment:
         display_info(f"Error optimizing audio: {str(e)}", "error")
         return audio
 
-def create_temp_audio_file(audio: AudioSegment, prefix: str = "temp", suffix: str = ".wav") -> str:
-    """
-    Create a temporary audio file in the audio folder.
-    
-    Args:
-        audio (AudioSegment): Audio segment to save
-        prefix (str): Prefix for the temporary file
-        suffix (str): File extension
-        
-    Returns:
-        str: Path to the created temporary file
-    """
-    try:
-        # Create a unique filename
-        temp_filename = f"{prefix}_{int(time.time() * 1000)}_{random.randint(1000, 9999)}{suffix}"
-        temp_path = os.path.join("audio", temp_filename)
-        
-        # Save the audio file
-        audio.export(
-            temp_path,
-            format="wav",
-            parameters=["-ac", "1", "-ar", "16000"]
-        )
-        
-        track_temp_files('create', temp_path)
-        return temp_path
-    except Exception as e:
-        display_info(f"Error creating temporary audio file: {str(e)}", "error")
-        return None
-
-def process_audio_chunk(chunk: AudioSegment, chunk_id: int) -> str:
-    """
-    Process a single audio chunk with optimized settings.
-    
-    Args:
-        chunk (AudioSegment): Audio chunk to process
-        chunk_id (int): Chunk identifier
-        
-    Returns:
-        str: Transcribed text
-    """
-    try:
-        # Optimize chunk
-        chunk = optimize_audio_processing(chunk)
-        
-        # Save to temporary file in audio folder
-        temp_file = create_temp_audio_file(chunk, f"chunk_{chunk_id}")
-        if not temp_file:
-            return ""
-        
-        # Process chunk
-        result = process_chunk(temp_file)
-        
-        # Clean up
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
-            track_temp_files('process', temp_file)
-        
-        return result
-    except Exception as e:
-        display_info(f"Error processing chunk {chunk_id}: {str(e)}", "error")
-        return ""
-
-def split_audio_optimized(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
-    """
-    Split audio into optimized chunks with improved performance.
-    """
-    try:
-        audio = AudioSegment.from_file(audio_path)
-        audio = optimize_audio_processing(audio)
-        temp_files = []
-        
-        display_info("\nSplitting audio into chunks...", "info")
-        
-        # Calculate optimal chunk size based on available memory
-        if torch.cuda.is_available():
-            gpu_memory = torch.cuda.get_device_properties(0).total_memory
-            # Adjust chunk size based on GPU memory
-            chunk_length_ms = min(chunk_length_ms, int(gpu_memory / (1024 * 1024 * 10)))  # 10MB per chunk
-        
-        # Create chunks
-        chunks = make_chunks(audio, chunk_length_ms)
-        
-        # Process chunks sequentially
-        for i, chunk in enumerate(chunks):
-            try:
-                # Optimize chunk
-                chunk = optimize_audio_processing(chunk)
-                
-                # Save to temporary file in audio folder
-                temp_file = create_temp_audio_file(chunk, f"chunk_{i}")
-                if not temp_file:
-                    continue
-                
-                # Process chunk
-                result = process_audio_chunk(chunk, i)
-                if result:
-                    temp_files.append(result)
-                
-                # Clean up
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-                    track_temp_files('process', temp_file)
-                    
-            except Exception as e:
-                display_info(f"Error processing chunk {i}: {str(e)}", "error")
-                continue
-        
-        return temp_files
-    except Exception as e:
-        display_info(f"Error splitting audio: {str(e)}", "error")
-        return []
-
 def get_urls() -> list[str]:
     """
     Get multiple URLs (YouTube or Google Drive) from user input until they confirm.
@@ -2229,12 +2069,7 @@ def download_from_url(url: str, output_folder: str = "audio") -> str:
             return download_youtube_audio_ytdlp(url, output_folder)
         elif "drive.google.com" in url:
             display_info("Detected Google Drive URL", "info")
-            # Try the basic method first
             result = download_google_drive_file(url, output_folder)
-            if not result:
-                # Fallback to gdown method
-                display_info("Trying alternative download method...", "info")
-                result = download_google_drive_file_gdown(url, output_folder)
             return result
         else:
             display_info(f"Unsupported URL format: {url}", "warning")
@@ -2347,7 +2182,7 @@ if __name__ == "__main__":
                         else:
                             files_to_process.append(file_name)
                     if files_to_process:
-                        process_files_parallel(files_to_process, audio_folder, output_folder, None, args.noise_reduction, args.reduction_strength, args.skip_speed)
+                        process_files_sequentially(files_to_process, audio_folder, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed)
                     else:
                         display_info("[Auto] No files left to process.", "info")
                     # Skip menu in auto mode
@@ -2365,7 +2200,7 @@ if __name__ == "__main__":
                         
                         if choice == "1":
                             # Process all files in parallel
-                            process_files_parallel(wav_files, audio_folder, output_folder, None, args.noise_reduction, args.reduction_strength, args.skip_speed)
+                            process_files_sequentially(wav_files, audio_folder, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed)
                             break
                             
                         elif choice == "2":
@@ -2396,7 +2231,7 @@ if __name__ == "__main__":
                             
                             # Process selected files
                             if selected_files:
-                                process_files_parallel(selected_files, audio_folder, output_folder, None, args.noise_reduction, args.reduction_strength, args.skip_speed)
+                                process_files_sequentially(selected_files, audio_folder, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed)
                             break
                             
                         elif choice == "3":
