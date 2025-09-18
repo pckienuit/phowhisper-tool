@@ -24,6 +24,7 @@ from difflib import SequenceMatcher
 import tempfile
 import time
 import argparse
+from urllib.parse import urlparse, parse_qs
 
 # Load environment variables
 load_dotenv()
@@ -959,6 +960,199 @@ def convert_youtube_url(url: str) -> str:
         return f"https://youtube.com/watch?v={video_id}"
     return url
 
+def extract_google_drive_id(url: str) -> str:
+    """
+    Extract file ID from Google Drive URL.
+    
+    Args:
+        url (str): Google Drive URL
+        
+    Returns:
+        str: File ID or None if not found
+    """
+    try:
+        # Pattern 1: https://drive.google.com/file/d/FILE_ID/view
+        pattern1 = r'/file/d/([a-zA-Z0-9_-]+)'
+        match = re.search(pattern1, url)
+        if match:
+            return match.group(1)
+        
+        # Pattern 2: https://drive.google.com/open?id=FILE_ID
+        pattern2 = r'[?&]id=([a-zA-Z0-9_-]+)'
+        match = re.search(pattern2, url)
+        if match:
+            return match.group(1)
+        
+        # Pattern 3: Direct file ID (if someone just pastes the ID)
+        if len(url) > 20 and len(url) < 50 and re.match(r'^[a-zA-Z0-9_-]+$', url):
+            return url
+            
+        return None
+    except Exception as e:
+        display_info(f"Error extracting Google Drive ID: {str(e)}", "error")
+        return None
+
+def is_google_drive_url(url: str) -> bool:
+    """
+    Check if URL is a Google Drive link.
+    
+    Args:
+        url (str): URL to check
+        
+    Returns:
+        bool: True if it's a Google Drive URL
+    """
+    return "drive.google.com" in url.lower()
+
+def download_google_drive_file(url: str, output_folder: str = "audio") -> str:
+    """
+    Download file from Google Drive URL using gdown library with proper filename detection.
+    
+    Args:
+        url (str): Google Drive URL
+        output_folder (str): Folder to save downloaded file
+        
+    Returns:
+        str: Path to downloaded file or None if failed
+    """
+    try:
+        import gdown
+        
+        # Extract file ID
+        file_id = extract_google_drive_id(url)
+        if not file_id:
+            display_info("Could not extract file ID from Google Drive URL", "error")
+            return None
+        
+        display_info(f"\nDownloading from Google Drive (ID: {file_id[:10]}...)", "info")
+        
+        # Create output folder if it doesn't exist
+        os.makedirs(output_folder, exist_ok=True)
+        
+        # Use gdown to download with proper filename detection
+        download_url = f"https://drive.google.com/uc?id={file_id}"
+        
+        # Let gdown determine the filename automatically
+        display_info("Getting file information...", "info")
+        
+        try:
+            # Use gdown.download with output=None to auto-detect filename
+            downloaded_path = gdown.download(download_url, output=None, quiet=False, fuzzy=True)
+            
+            if downloaded_path and os.path.exists(downloaded_path):
+                # Move file to our output folder
+                original_filename = os.path.basename(downloaded_path)
+                final_path = os.path.join(output_folder, original_filename)
+                
+                # If file already exists in output folder, remove it first
+                if os.path.exists(final_path):
+                    os.remove(final_path)
+                
+                # Move the downloaded file
+                os.rename(downloaded_path, final_path)
+                
+                file_size = os.path.getsize(final_path)
+                display_info(f"✓ Downloaded: {original_filename} ({file_size:,} bytes)", "success")
+                
+                # Check if it's a valid audio file by trying to load it
+                try:
+                    # Test if file can be loaded as audio
+                    test_audio = AudioSegment.from_file(final_path)
+                    display_info(f"✓ File verified as valid audio: {len(test_audio)/1000:.1f}s duration", "success")
+                    
+                    # Convert to WAV if not already
+                    if not original_filename.lower().endswith('.wav'):
+                        display_info("Converting to WAV format...", "info")
+                        audio = normalize_audio(test_audio)
+                        wav_path = os.path.splitext(final_path)[0] + '.wav'
+                        audio.export(
+                            wav_path,
+                            format="wav",
+                            parameters=["-ac", "1", "-ar", "16000"]
+                        )
+                        
+                        # Remove original file
+                        os.remove(final_path)
+                        display_info(f"✓ Converted to WAV: {os.path.basename(wav_path)}", "success")
+                        return wav_path
+                    else:
+                        return final_path
+                        
+                except Exception as e:
+                    display_info(f"Error: File is not a valid audio format - {str(e)}", "error")
+                    display_info("The downloaded file may be corrupted or not an audio file", "error")
+                    os.remove(final_path)
+                    return None
+            else:
+                display_info("gdown failed to download file", "error")
+                return None
+                
+        except Exception as e:
+            display_info(f"gdown download failed: {str(e)}", "error")
+            
+            # Try alternative gdown method with manual filename
+            display_info("Trying alternative gdown method...", "info")
+            try:
+                temp_path = os.path.join(output_folder, f"gdrive_temp_{file_id[:8]}")
+                result = gdown.download(download_url, output=temp_path, quiet=False)
+                
+                if result and os.path.exists(temp_path):
+                    # Try to detect file type and set proper extension
+                    try:
+                        audio = AudioSegment.from_file(temp_path)
+                        final_filename = f"gdrive_audio_{file_id[:8]}.wav"
+                        final_path = os.path.join(output_folder, final_filename)
+                        
+                        audio = normalize_audio(audio)
+                        audio.export(
+                            final_path,
+                            format="wav",
+                            parameters=["-ac", "1", "-ar", "16000"]
+                        )
+                        
+                        os.remove(temp_path)
+                        display_info(f"✓ Downloaded and converted: {final_filename}", "success")
+                        return final_path
+                        
+                    except Exception:
+                        # If can't process as audio, keep original
+                        final_filename = f"gdrive_file_{file_id[:8]}"
+                        final_path = os.path.join(output_folder, final_filename)
+                        os.rename(temp_path, final_path)
+                        display_info(f"Downloaded but could not verify as audio: {final_filename}", "warning")
+                        return None
+                else:
+                    display_info("Alternative gdown method also failed", "error")
+                    return None
+                    
+            except Exception as e2:
+                display_info(f"Alternative gdown method failed: {str(e2)}", "error")
+                return None
+        
+        display_info("All download methods failed. Possible issues:", "error")
+        display_info("1. File is not publicly accessible (not set to 'Anyone with the link')", "error")
+        display_info("2. File requires Google account authentication", "error")
+        display_info("3. File has been moved or deleted", "error")
+        display_info("4. Google Drive quota exceeded", "error")
+        display_info("\nTo fix this:", "info")
+        display_info("1. Right-click file in Google Drive → Share → Change to 'Anyone with the link'", "info")
+        display_info("2. Try downloading manually first to verify the link works", "info")
+        display_info("3. Consider uploading to a different service (YouTube, Dropbox, etc.)", "info")
+        
+        return None
+            
+    except ImportError:
+        display_info("gdown library not installed. Installing...", "warning")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "gdown"])
+            display_info("✓ gdown installed. Please run the command again.", "success")
+        except:
+            display_info("Failed to install gdown. Please install manually: pip install gdown", "error")
+        return None
+    except Exception as e:
+        display_info(f"\nError downloading from Google Drive: {str(e)}", "error")
+        return None
+
 def check_file_status(audio_name: str, output_folder: str) -> tuple[bool, bool]:
     """
     Check if a file has been converted and transcribed.
@@ -1393,15 +1587,18 @@ def split_audio_optimized(audio_path: str, chunk_length_ms: int = 30000) -> List
         display_info(f"Error splitting audio: {str(e)}", "error")
         return []
 
-def get_youtube_urls() -> list[str]:
+def get_urls() -> list[str]:
     """
-    Get multiple YouTube URLs from user input until they confirm.
+    Get multiple URLs (YouTube or Google Drive) from user input until they confirm.
     
     Returns:
-        list[str]: List of valid YouTube URLs
+        list[str]: List of valid URLs
     """
     urls = []
-    display_info("\nEnter YouTube URLs (one per line).", "info")
+    display_info("\nEnter URLs (YouTube or Google Drive) one per line.", "info")
+    display_info("Supported formats:", "info")
+    display_info("- YouTube: https://youtube.com/watch?v=... or https://youtu.be/...", "info")
+    display_info("- Google Drive: https://drive.google.com/file/d/.../view", "info")
     display_info("Enter 'done' when finished, or 'exit' to cancel.", "info")
     
     while True:
@@ -1416,11 +1613,48 @@ def get_youtube_urls() -> list[str]:
             break
         elif "youtube.com" in url or "youtu.be" in url:
             urls.append(convert_youtube_url(url))
-            display_info(f"Added URL: {url}", "success")
+            display_info(f"Added YouTube URL: {url}", "success")
+        elif "drive.google.com" in url:
+            urls.append(url)
+            display_info(f"Added Google Drive URL: {url}", "success")
         else:
-            display_info("Invalid YouTube URL. Please enter a valid YouTube URL.", "warning")
+            display_info("Invalid URL. Please enter a valid YouTube or Google Drive URL.", "warning")
+            display_info("Examples:", "info")
+            display_info("  YouTube: https://youtube.com/watch?v=VIDEO_ID", "info")
+            display_info("  Google Drive: https://drive.google.com/file/d/FILE_ID/view", "info")
     
     return urls
+
+def download_from_url(url: str, output_folder: str = "audio") -> str:
+    """
+    Download file from URL (YouTube or Google Drive).
+    
+    Args:
+        url (str): URL to download from
+        output_folder (str): Folder to save downloaded file
+        
+    Returns:
+        str: Path to downloaded file or None if failed
+    """
+    try:
+        if "youtube.com" in url or "youtu.be" in url:
+            display_info("Detected YouTube URL", "info")
+            return download_youtube_audio_ytdlp(url, output_folder)
+        elif "drive.google.com" in url:
+            display_info("Detected Google Drive URL", "info")
+            # Try the basic method first
+            result = download_google_drive_file(url, output_folder)
+            if not result:
+                # Fallback to gdown method
+                display_info("Trying alternative download method...", "info")
+                result = download_google_drive_file_gdown(url, output_folder)
+            return result
+        else:
+            display_info(f"Unsupported URL format: {url}", "warning")
+            return None
+    except Exception as e:
+        display_info(f"Error downloading from URL: {str(e)}", "error")
+        return None
 
 # Main execution
 if __name__ == "__main__":
@@ -1459,32 +1693,41 @@ if __name__ == "__main__":
     display_info("\n=== Audio Transcription Process Started ===", "info")
     
     try:
-        # Check if YouTube URL is provided as command line argument
-        if len(sys.argv) > 1 and ("youtube.com" in sys.argv[1] or "youtu.be" in sys.argv[1]):
-            youtube_url = convert_youtube_url(sys.argv[1])
-            display_info(f"\nProcessing YouTube URL: {youtube_url}", "info")
-            audio_path = download_youtube_audio_ytdlp(youtube_url, audio_folder)
-            if audio_path:
-                audio_name = os.path.basename(audio_path)
-                process_single_file(audio_path, audio_name, output_folder)
+        # Check if URL is provided as command line argument
+        if len(sys.argv) > 1:
+            input_url = sys.argv[1]
+            if "youtube.com" in input_url or "youtu.be" in input_url or "drive.google.com" in input_url:
+                display_info(f"\nProcessing URL: {input_url}", "info")
+                audio_path = download_from_url(input_url, audio_folder)
+                if audio_path:
+                    audio_name = os.path.basename(audio_path)
+                    process_single_file(audio_path, audio_name, output_folder)
+                else:
+                    display_info("Failed to download from URL", "error")
+                    sys.exit(1)
+            else:
+                display_info(f"Unsupported URL format: {input_url}", "error")
+                sys.exit(1)
         else:
             # Process all files in the audio folder
             wav_files = convert_to_wav(audio_folder, output_folder)
     
             if not wav_files:
                 display_info("\nNo new files to process.", "warning")
-                youtube_urls = get_youtube_urls()
+                urls = get_urls()
                 
-                if youtube_urls:
-                    display_info(f"\nProcessing {len(youtube_urls)} YouTube URLs...", "info")
-                    for url in youtube_urls:
-                        display_info(f"\nProcessing URL: {url}", "info")
-                        audio_path = download_youtube_audio_ytdlp(url, audio_folder)
+                if urls:
+                    display_info(f"\nProcessing {len(urls)} URLs...", "info")
+                    for i, url in enumerate(urls):
+                        display_info(f"\n[{i+1}/{len(urls)}] Processing URL: {url}", "info")
+                        audio_path = download_from_url(url, audio_folder)
                         if audio_path:
                             audio_name = os.path.basename(audio_path)
                             process_single_file(audio_path, audio_name, output_folder)
+                        else:
+                            display_info(f"Failed to download from URL: {url}", "error")
                 else:
-                    display_info("\nNo YouTube URLs provided. Exiting...", "warning")
+                    display_info("\nNo URLs provided. Exiting...", "warning")
                 sys.exit(0)
             else:
                 display_info(f"\nFound {len(wav_files)} files to process.", "info")
