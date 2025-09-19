@@ -8,10 +8,12 @@ This tool is your intelligent assistant for listening to audio recordings, YouTu
 - **Auto-cleanup:** Automatically deletes audio files that have already been processed.
 - **Speed file handling:** If a file with `_speed` in its name exists, only processes the `_speed` file and skips the original.
 - **Optimized speed:** For long files, automatically finds and creates an optimal speed version for faster processing (unless a `_speed` file already exists).
-- **YouTube audio support:** Download and transcribe audio directly from YouTube links.
+- **YouTube and Google Drive support:** Download and transcribe audio directly from YouTube and Google Drive links.
+- **Advanced noise reduction:** Apply adaptive noise reduction algorithms to improve transcription quality.
 - **Flexible CLI:** Supports both automatic and manual modes, with full CLI argument support for scripting and automation.
 - **Manual file management:** In manual mode, allows you to select, skip, or delete files interactively.
-- **Seamless Gemini integration:** Processes transcripts with Gemini for advanced post-processing.
+- **Seamless Gemini integration:** Processes transcripts with Gemini AI for advanced post-processing and content structuring.
+- **GUI interface:** User-friendly graphical interface with Q&A capabilities for lecture content.
 - **Output management:** Saves both raw and processed transcripts to the `output` folder.
 
 ## Requirements
@@ -142,10 +144,19 @@ python phowhisper.py --mode manual --device cpu
 python phowhisper.py --mode manual --device cuda
 ```
 
-#### Process YouTube Audio
+#### Process YouTube/Google Drive Audio
 ```bash
 python phowhisper.py https://youtube.com/watch?v=xxxx
+python phowhisper.py https://drive.google.com/file/d/xxxx/view
 ```
+
+#### GUI Interface
+```bash
+python gui.py
+```
+- User-friendly graphical interface
+- Supports drag & drop files
+- Integrated Q&A functionality for lecture content
 
 ### 3. File Handling Rules
 - If a file with `_speed` in its name exists in the `audio` folder, only the `_speed` file is processed; the original is skipped.
@@ -155,6 +166,15 @@ python phowhisper.py https://youtube.com/watch?v=xxxx
 ### 4. CLI Arguments
 - `--mode auto|manual` : Select automatic or manual mode (default: auto)
 - `--device cpu|cuda` : Specify device in manual mode
+- `--noise-reduction` : Apply noise reduction preprocessing
+- `--reduction-strength` : Noise reduction strength (0.0-1.0, default: 0.5)
+- `--skip-speed` : Skip speed optimization for faster processing
+
+#### Examples with noise reduction:
+```bash
+python phowhisper.py --noise-reduction --reduction-strength 0.7
+python phowhisper.py --mode manual --device cuda --noise-reduction
+```
 
 ### 5. Output Files
 For each processed audio file, the following files are generated in the `output` folder:
@@ -165,6 +185,7 @@ For each processed audio file, the following files are generated in the `output`
 - `audio/` - Directory for input audio files
 - `output/` - Directory for transcription results
 - `phowhisper.py` - Main script
+- `gui.py` - Graphical user interface
 - `systemprompt` - Gemini AI processing instructions
 - `requirements.txt` - Python dependencies
 
