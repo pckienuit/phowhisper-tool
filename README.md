@@ -1,247 +1,53 @@
-# PhoWhisper Tool
+# What the F is this tool?
 
-Công cụ thông minh để chuyển đổi âm thanh thành văn bản với khả năng xử lý tiếng ồn nền và tối ưu hóa hiệu suất. Hỗ trợ transcription audio từ file, YouTube, và nhiều nguồn khác với AI model Whisper.
+This tool is your intelligent assistant for listening to audio recordings, YouTube videos, lectures, and more. It automatically transcribes speech and summarizes the content into clear, structured notes—making it easy to review, study, or share important information from any audio or video source.
 
-## ✨ Tính năng chính
+## Features
+- **Automatic device selection:** Detects and uses GPU if available, otherwise falls back to CPU.
+- **Batch audio processing:** Processes all audio files in the `audio` folder automatically.
+- **Auto-cleanup:** Automatically deletes audio files that have already been processed.
+- **Speed file handling:** If a file with `_speed` in its name exists, only processes the `_speed` file and skips the original.
+- **Optimized speed:** For long files, automatically finds and creates an optimal speed version for faster processing (unless a `_speed` file already exists).
+- **YouTube audio support:** Download and transcribe audio directly from YouTube links.
+- **Flexible CLI:** Supports both automatic and manual modes, with full CLI argument support for scripting and automation.
+- **Manual file management:** In manual mode, allows you to select, skip, or delete files interactively.
+- **Seamless Gemini integration:** Processes transcripts with Gemini for advanced post-processing.
+- **Output management:** Saves both raw and processed transcripts to the `output` folder.
 
-### 🎯 Core Features
-- **Auto transcription**: Tự động chuyển đổi speech thành text với độ chính xác cao
-- **Noise reduction**: Xử lý và giảm tiếng ồn nền trước khi transcribe
-- **Smart chunking**: Tự động chia audio thành các đoạn tối ưu (≤ 30s) để xử lý hiệu quả
-- **GPU optimization**: Tự động phát hiện và sử dụng GPU (CUDA) nếu có sẵn
-- **Batch processing**: Xử lý hàng loạt tất cả file trong thư mục `audio/`
+## Requirements
+- Python 3.8 or higher
+- FFmpeg installed on your system
+- NVIDIA GPU with CUDA support (recommended)
+- PyTorch
 
-### 🔧 Advanced Features  
-- **Speed optimization**: Option để bỏ qua speed processing cho xử lý nhanh
-- **Adaptive processing**: Phân tích noise level và tự động điều chỉnh strategy
-- **YouTube support**: Download và transcribe trực tiếp từ YouTube links
-- **Auto cleanup**: Tự động xóa file đã xử lý
-- **Output management**: Lưu kết quả vào thư mục `output/` với format rõ ràng
+## Installation Guide
 
-### 🎛️ CLI Options
-- `--noise-reduction`: Bật chức năng giảm tiếng ồn
-- `--reduction-strength`: Điều chỉnh cường độ giảm noise (0.5-2.0)
-- `--skip-speed`: Bỏ qua speed optimization để xử lý nhanh hơn
-- `--auto`: Chế độ tự động không cần interaction
-- `--manual`: Chế độ thủ công cho phép chọn file
+### 1. Install Python Dependencies
 
-## 🚀 Cài đặt
-
-### 1. Yêu cầu hệ thống
-- Python 3.8+
-- FFmpeg
-- NVIDIA GPU với CUDA support (khuyến nghị)
-- 4GB+ RAM cho việc xử lý audio dài
-
-### 2. Cài đặt PyTorch
-
-#### Windows (với CUDA)
-```bash
-# Cho GPU NVIDIA
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# Cho CPU only
-pip3 install torch torchvision torchaudio
-```
-
-#### macOS
-```bash
-# Cho CPU only
-pip3 install torch torchvision torchaudio
-
-# Cho Apple Silicon (M1/M2)
-pip3 install torch torchvision torchaudio
-```
-
-#### Linux
-```bash
-# Cho CUDA
-pip3 install torch torchvision torchaudio
-
-# Cho CPU only  
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-```
-
-### 3. Cài đặt dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Cài đặt FFmpeg
-
-#### Windows
-1. Download từ [FFmpeg official site](https://ffmpeg.org/download.html)
-2. Extract và thêm vào PATH
-3. Hoặc sử dụng Chocolatey: `choco install ffmpeg`
-
-#### macOS
-```bash
-# Sử dụng Homebrew
-brew install ffmpeg
-```
-
-#### Linux (Ubuntu/Debian)
-```bash
-sudo apt update
-sudo apt install ffmpeg
-```
-
-## 📖 Hướng dẫn sử dụng
-
-### Cách sử dụng cơ bản
-
-1. **Chuẩn bị file audio**: Đặt file audio vào thư mục `audio/`
-2. **Chạy tool**: 
+#### Installing PyTorch
+##### Windows
+1. Visit [PyTorch's official website](https://pytorch.org/get-started/locally/)
+2. Select your preferences:
+   - PyTorch Build: Stable
+   - Your OS: Windows
+   - Package: Pip
+   - Language: Python
+   - Compute Platform: CUDA (if you have NVIDIA GPU) or CPU
+3. Copy and run the generated command. For example:
    ```bash
-   python phowhisper.py
+   # For CUDA (GPU) support:
+   pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+   # For CPU only:
+   pip3 install torch torchvision torchaudio
    ```
-3. **Kết quả**: Xem file transcription trong thư mục `output/`
 
-### Các chế độ nâng cao
-
-#### Với noise reduction
+##### macOS
 ```bash
-# Bật giảm tiếng ồn với cường độ mặc định
-python phowhisper.py --noise-reduction
+# For CPU only:
+pip3 install torch torchvision torchaudio
 
-# Điều chỉnh cường độ giảm noise
-python phowhisper.py --noise-reduction --reduction-strength 1.5
-```
-
-#### Chế độ tốc độ cao
-```bash
-# Bỏ qua speed optimization
-python phowhisper.py --skip-speed
-
-# Kết hợp với noise reduction
-python phowhisper.py --noise-reduction --skip-speed
-```
-
-#### Chế độ tự động
-```bash
-# Xử lý tất cả file mà không cần interaction
-python phowhisper.py --auto
-
-# Tự động với noise reduction
-python phowhisper.py --auto --noise-reduction
-```
-
-### YouTube transcription
-```bash
-# Tool sẽ tự động phát hiện YouTube URLs trong input
-python phowhisper.py
-# Nhập YouTube URL khi được yêu cầu
-```
-
-## 📁 Cấu trúc thư mục
-
-```
-phowhisper-tool/
-├── audio/              # Đặt file audio input vào đây
-├── output/             # Kết quả transcription được lưu ở đây
-├── phowhisper.py       # Script chính
-├── gui.py              # Giao diện GUI (optional)
-├── requirements.txt    # Dependencies
-├── .env               # Config file (optional)
-└── README.md          # Tài liệu này
-```
-
-## ⚙️ Cấu hình nâng cao
-
-### Noise Reduction Settings
-- **Default strength**: 1.0 (balanced)
-- **Light noise**: 0.5-0.8 
-- **Heavy noise**: 1.5-2.0
-- **Algorithm**: Spectral subtraction + High-pass filtering
-
-### Chunk Processing
-- **Maximum chunk size**: 30 seconds
-- **Minimum chunk size**: 2 seconds  
-- **Smart chunking**: Phân tích noise level để tối ưu
-- **Fallback**: Fixed 30s chunks khi algorithm thất bại
-
-### Performance Tips
-- Sử dụng GPU để tăng tốc độ xử lý đáng kể
-- Với file > 10 phút: khuyến nghị dùng `--noise-reduction`
-- Với audio chất lượng thấp: dùng `--reduction-strength 1.5`
-- Để xử lý nhanh: dùng `--skip-speed`
-
-## 🎛️ Environment Variables
-
-Tạo file `.env` để cấu hình:
-```env
-# GPU settings
-CUDA_VISIBLE_DEVICES=0
-
-# Model settings  
-WHISPER_MODEL=base
-DEVICE=auto
-
-# Processing settings
-MAX_CHUNK_SIZE=30
-NOISE_REDUCTION_DEFAULT=1.0
-```
-
-## 🔧 Troubleshooting
-
-### Lỗi thường gặp
-
-#### "CUDA out of memory"
-```bash
-# Giảm batch size hoặc sử dụng CPU
-python phowhisper.py --skip-speed
-```
-
-#### "FFmpeg not found"
-- Đảm bảo FFmpeg đã được cài đặt và trong PATH
-- Windows: Thêm FFmpeg bin folder vào System PATH
-
-#### Audio quality thấp
-```bash
-# Tăng cường độ noise reduction
-python phowhisper.py --noise-reduction --reduction-strength 2.0
-```
-
-#### Xử lý chậm
-```bash
-# Sử dụng skip speed mode
-python phowhisper.py --skip-speed
-```
-
-### Performance Benchmarks
-- **GPU (RTX 3080)**: ~10x nhanh hơn CPU
-- **CPU (Intel i7)**: 1 phút audio ≈ 2-3 phút xử lý
-- **Memory usage**: ~2-4GB cho file audio 1 giờ
-
-## 🤝 Đóng góp
-
-1. Fork repository
-2. Tạo feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to branch (`git push origin feature/AmazingFeature`)
-5. Mở Pull Request
-
-## 📜 License
-
-Project này sử dụng MIT License. Xem file `LICENSE` để biết thêm chi tiết.
-
-## 🙏 Credits
-
-- **Whisper**: OpenAI's speech recognition model
-- **PyTorch**: Deep learning framework
-- **FFmpeg**: Audio/video processing
-- **Scipy**: Signal processing for noise reduction
-
-## 📞 Support
-
-Nếu gặp vấn đề hoặc có câu hỏi:
-1. Kiểm tra [Troubleshooting](#🔧-troubleshooting) section
-2. Tạo issue trên GitHub
-3. Email: [your-email@example.com]
-
----
-
-**Made with ❤️ for Vietnamese transcription needs**
+# For MPS (Apple Silicon) support:
 pip3 install torch torchvision torchaudio
 ```
 
