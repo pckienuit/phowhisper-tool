@@ -10,7 +10,9 @@ from phowhisper import (
     transcribe_audio,
     process_transcript_with_gemini,
     ask_gemini_question,
-    cleanup_audio_folder
+    cleanup_audio_folder,
+    detect_audio_language,
+    load_transcriber_for_language
 )
 
 class ResultViewer(tk.Toplevel):
@@ -646,6 +648,11 @@ class TranscriptionApp:
             audio_path = download_youtube_audio_ytdlp(youtube_url, "audio")
             if not audio_path:
                 raise Exception("Failed to download audio")
+            
+            # Detect language and load appropriate model
+            self.update_progress("Detecting language...")
+            detected_language = detect_audio_language(audio_path)
+            load_transcriber_for_language(detected_language)
                 
             # Transcribe audio
             self.update_progress("Transcribing audio...")
@@ -705,6 +712,11 @@ class TranscriptionApp:
         try:
             self.progress_bar.start()
             self.update_progress(f"Processing file: {file_path}")
+            
+            # Detect language and load appropriate model
+            self.update_progress("Detecting language...")
+            detected_language = detect_audio_language(file_path)
+            load_transcriber_for_language(detected_language)
             
             # Transcribe audio
             self.update_progress("Transcribing audio...")

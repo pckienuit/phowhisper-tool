@@ -106,6 +106,145 @@ transcriber = pipeline(
     model_kwargs={"use_cache": True}  # Enable model caching
 )
 
+# Global variable to store current model info
+current_model_info = {
+    "name": "vinai/PhoWhisper-large",
+    "language": "vietnamese"
+}
+
+def detect_audio_language(audio_path: str, sample_duration: int = 30) -> str:
+    """
+    Detect the language of the audio file by sampling a portion of it.
+    
+    Args:
+        audio_path (str): Path to audio file
+        sample_duration (int): Duration in seconds to sample for detection
+        
+    Returns:
+        str: Detected language code ('vi' for Vietnamese, 'en' for English, etc.)
+    """
+    try:
+        display_info("Detecting audio language...", "info")
+        
+        # Load a sample of the audio
+        audio = AudioSegment.from_file(audio_path)
+        
+        # Take a sample from the middle of the audio (more likely to have speech)
+        start_ms = len(audio) // 3
+        end_ms = min(start_ms + (sample_duration * 1000), len(audio))
+        sample_audio = audio[start_ms:end_ms]
+        
+        # Export sample to temporary file
+        temp_sample_path = os.path.join(os.path.dirname(audio_path), "_temp_language_detect.wav")
+        sample_audio.export(temp_sample_path, format="wav")
+        
+        try:
+            # Use a lightweight Whisper model for language detection
+            detector = pipeline(
+                "automatic-speech-recognition",
+                model="openai/whisper-base",
+                device=selected_device,
+                return_timestamps=True
+            )
+            
+            # Transcribe with language detection
+            result = detector(temp_sample_path, return_timestamps=True, generate_kwargs={"task": "transcribe"})
+            
+            # Clean up detector
+            del detector
+            gc.collect()
+            if selected_device == "cuda":
+                torch.cuda.empty_cache()
+            
+            # Analyze the transcription to detect language
+            text = result.get("text", "").strip()
+            
+            # Simple heuristic: check for English vs Vietnamese characteristics
+            # English has more ASCII, Vietnamese has more diacritics
+            if text:
+                ascii_count = sum(1 for c in text if ord(c) < 128)
+                total_chars = len(text.replace(" ", ""))
+                
+                if total_chars > 0:
+                    ascii_ratio = ascii_count / total_chars
+                    
+                    # If more than 90% ASCII and contains common English words, likely English
+                    english_words = ['the', 'is', 'are', 'was', 'were', 'and', 'or', 'to', 'of', 'in', 'a', 'an']
+                    text_lower = text.lower()
+                    english_word_count = sum(1 for word in english_words if word in text_lower.split())
+                    
+                    if ascii_ratio > 0.9 or english_word_count >= 3:
+                        display_info("Detected language: English", "success")
+                        return "en"
+            
+            display_info("Detected language: Vietnamese", "success")
+            return "vi"
+            
+        finally:
+            # Clean up temporary sample file
+            if os.path.exists(temp_sample_path):
+                os.remove(temp_sample_path)
+                
+    except Exception as e:
+        display_info(f"Language detection failed, defaulting to Vietnamese: {str(e)}", "warning")
+        return "vi"
+
+def load_transcriber_for_language(language: str, device: str = None) -> None:
+    """
+    Load the appropriate transcription model based on detected language.
+    
+    Args:
+        language (str): Language code ('vi' or 'en')
+        device (str): Device to use ('cpu' or 'cuda')
+    """
+    global transcriber, current_model_info
+    
+    if device is None:
+        device = selected_device
+    
+    try:
+        # Determine which model to use
+        if language == "en":
+            model_name = "openai/whisper-medium"
+            display_info(f"Loading English model: {model_name}", "info")
+        else:
+            model_name = "vinai/PhoWhisper-medium"
+            display_info(f"Loading Vietnamese model: {model_name}", "info")
+        
+        # Check if we need to switch models
+        if current_model_info["name"] == model_name:
+            display_info(f"Model {model_name} already loaded", "info")
+            return
+        
+        # Clean up existing model
+        del transcriber
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        
+        # Load new model
+        transcriber = pipeline(
+            "automatic-speech-recognition",
+            model=model_name,
+            device=device,
+            return_timestamps=True,
+            framework="pt",
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            model_kwargs={"use_cache": True}
+        )
+        
+        # Update current model info
+        current_model_info = {
+            "name": model_name,
+            "language": language
+        }
+        
+        display_info(f"Successfully loaded {model_name}", "success")
+        
+    except Exception as e:
+        display_info(f"Error loading model for language {language}: {str(e)}", "error")
+        raise
+
 # Suppress all warnings
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -1735,6 +1874,11 @@ def process_single_file(audio_path: str, audio_name: str, output_folder: str, no
         display_info(f"✓ Processed output saved to: {processed_file}", "success")
     else:
         display_info(f"\nProcessing new file: {audio_name}", "info")
+        
+        # Detect language and load appropriate model
+        detected_language = detect_audio_language(audio_path)
+        load_transcriber_for_language(detected_language)
+        
         # Skip speed optimization if requested or if file is already a _speed file
         if skip_speed_optimization:
             display_info("Speed optimization skipped by user request.", "info")
