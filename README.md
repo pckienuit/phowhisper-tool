@@ -169,11 +169,27 @@ python gui.py
 - `--noise-reduction` : Apply noise reduction preprocessing
 - `--reduction-strength` : Noise reduction strength (0.0-1.0, default: 0.5)
 - `--skip-speed` : Skip speed optimization for faster processing
+- `--asr-model` : ASR model selection: `auto` (auto-detect language), `phowhisper` (Vietnamese only), `whisper` (multilingual)
 
 #### Examples with noise reduction:
 ```bash
 python phowhisper.py --noise-reduction --reduction-strength 0.7
 python phowhisper.py --mode manual --device cuda --noise-reduction
+```
+
+#### Examples with ASR model selection:
+```bash
+# Auto-detect language (default)
+python phowhisper.py --asr-model auto
+
+# Force Vietnamese model (PhoWhisper) even for English audio
+python phowhisper.py --asr-model phowhisper
+
+# Force multilingual model (Whisper) even for Vietnamese audio
+python phowhisper.py --asr-model whisper
+
+# Combine with other options
+python phowhisper.py --asr-model whisper --device cuda --noise-reduction
 ```
 
 ### 5. Output Files

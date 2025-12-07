@@ -189,13 +189,14 @@ def detect_audio_language(audio_path: str, sample_duration: int = 30) -> str:
         display_info(f"Language detection failed, defaulting to Vietnamese: {str(e)}", "warning")
         return "vi"
 
-def load_transcriber_for_language(language: str, device: str = None) -> None:
+def load_transcriber_for_language(language: str, device: str = None, force_model: str = None) -> None:
     """
-    Load the appropriate transcription model based on detected language.
+    Load the appropriate transcription model based on detected language or forced model.
     
     Args:
         language (str): Language code ('vi' or 'en')
         device (str): Device to use ('cpu' or 'cuda')
+        force_model (str): Force specific model ('phowhisper', 'whisper', or None for auto)
     """
     global transcriber, current_model_info
     
@@ -204,7 +205,13 @@ def load_transcriber_for_language(language: str, device: str = None) -> None:
     
     try:
         # Determine which model to use
-        if language == "en":
+        if force_model == "phowhisper":
+            model_name = "vinai/PhoWhisper-medium"
+            display_info(f"Loading Vietnamese model (forced): {model_name}", "info")
+        elif force_model == "whisper":
+            model_name = "openai/whisper-medium"
+            display_info(f"Loading multilingual model (forced): {model_name}", "info")
+        elif language == "en":
             model_name = "openai/whisper-medium"
             display_info(f"Loading English model: {model_name}", "info")
         else:
@@ -1274,7 +1281,7 @@ def convert_to_wav(input_folder: str, output_folder: str) -> list[str]:
             display_info(f"\nFile {file_name} has already been fully processed.", "info")
             # Still process the file to allow user interaction
             audio_path = os.path.join(input_folder, file_name)
-            process_single_file(audio_path, file_name, output_folder, False, 0.5, False)
+            process_single_file(audio_path, file_name, output_folder, False, 0.5, False, 'auto')
             continue
             
         file_path = os.path.join(input_folder, file_name)
@@ -1845,7 +1852,7 @@ def check_file_status(audio_name: str, output_folder: str) -> tuple[bool, bool]:
     
     return is_converted, is_transcribed
 
-def process_single_file(audio_path: str, audio_name: str, output_folder: str, noise_reduction: bool = False, reduction_strength: float = 0.5, skip_speed_optimization: bool = False) -> None:
+def process_single_file(audio_path: str, audio_name: str, output_folder: str, noise_reduction: bool = False, reduction_strength: float = 0.5, skip_speed_optimization: bool = False, asr_model: str = 'auto') -> None:
     """
     Process a single audio file without any interactive input.
     Args:
@@ -1855,6 +1862,7 @@ def process_single_file(audio_path: str, audio_name: str, output_folder: str, no
         noise_reduction (bool): Whether to apply noise reduction
         reduction_strength (float): Strength of noise reduction (0.0-1.0)
         skip_speed_optimization (bool): Whether to skip speed optimization
+        asr_model (str): ASR model selection ('auto', 'phowhisper', 'whisper')
     """
     is_converted, is_transcribed = check_file_status(audio_name, output_folder)
     base_name = os.path.splitext(audio_name)[0]
@@ -1876,8 +1884,15 @@ def process_single_file(audio_path: str, audio_name: str, output_folder: str, no
         display_info(f"\nProcessing new file: {audio_name}", "info")
         
         # Detect language and load appropriate model
-        detected_language = detect_audio_language(audio_path)
-        load_transcriber_for_language(detected_language)
+        if asr_model == 'auto':
+            detected_language = detect_audio_language(audio_path)
+            load_transcriber_for_language(detected_language)
+        elif asr_model == 'phowhisper':
+            display_info("Using PhoWhisper model (Vietnamese only, forced by user)", "info")
+            load_transcriber_for_language('vi', force_model='phowhisper')
+        elif asr_model == 'whisper':
+            display_info("Using Whisper model (multilingual, forced by user)", "info")
+            load_transcriber_for_language('en', force_model='whisper')
         
         # Skip speed optimization if requested or if file is already a _speed file
         if skip_speed_optimization:
@@ -2044,7 +2059,7 @@ def cleanup_temp_files() -> None:
     
     display_info("Temporary files cleanup completed", "success")
 
-def process_files_sequentially(files_to_process: list[str], input_folder: str, output_folder: str, noise_reduction: bool = False, reduction_strength: float = 0.5, skip_speed_optimization: bool = False) -> None:
+def process_files_sequentially(files_to_process: list[str], input_folder: str, output_folder: str, noise_reduction: bool = False, reduction_strength: float = 0.5, skip_speed_optimization: bool = False, asr_model: str = 'auto') -> None:
     """
     Process multiple files sequentially for better stability and resource management.
     
@@ -2055,6 +2070,7 @@ def process_files_sequentially(files_to_process: list[str], input_folder: str, o
         noise_reduction (bool): Whether to apply noise reduction
         reduction_strength (float): Strength of noise reduction (0.0-1.0)
         skip_speed_optimization (bool): Whether to skip speed optimization
+        asr_model (str): ASR model selection ('auto', 'phowhisper', 'whisper')
     """
     display_info(f"\nProcessing {len(files_to_process)} files sequentially", "info")
     
@@ -2065,7 +2081,7 @@ def process_files_sequentially(files_to_process: list[str], input_folder: str, o
             display_info(f"\n[{i+1}/{len(files_to_process)}] Processing: {file_name}", "info")
             
             # Process single file
-            process_single_file(audio_path, file_name, output_folder, noise_reduction, reduction_strength, skip_speed_optimization)
+            process_single_file(audio_path, file_name, output_folder, noise_reduction, reduction_strength, skip_speed_optimization, asr_model)
             
             # Clear memory after each file
             if torch.cuda.is_available():
@@ -2227,6 +2243,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PhoWhisper CLI")
     parser.add_argument('--mode', choices=['auto', 'manual'], default='auto', help='Device selection mode: auto/manual (default: auto)')
     parser.add_argument('--device', choices=['cpu', 'cuda'], default=None, help='Device to use if manual')
+    parser.add_argument('--asr-model', choices=['auto', 'phowhisper', 'whisper'], default='auto', help='ASR model selection: auto (detect language), phowhisper (Vietnamese only), whisper (multilingual)')
     parser.add_argument('--noise-reduction', action='store_true', help='Apply noise reduction preprocessing')
     parser.add_argument('--reduction-strength', type=float, default=0.5, help='Noise reduction strength (0.0-1.0, default: 0.5)')
     parser.add_argument('--skip-speed', action='store_true', help='Skip speed optimization for faster processing')
@@ -2270,7 +2287,7 @@ if __name__ == "__main__":
                 audio_path = download_from_url(input_url, audio_folder)
                 if audio_path:
                     audio_name = os.path.basename(audio_path)
-                    process_single_file(audio_path, audio_name, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed)
+                    process_single_file(audio_path, audio_name, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed, args.asr_model)
                 else:
                     display_info("Failed to download from URL", "error")
                     sys.exit(1)
@@ -2292,7 +2309,7 @@ if __name__ == "__main__":
                         audio_path = download_from_url(url, audio_folder)
                         if audio_path:
                             audio_name = os.path.basename(audio_path)
-                            process_single_file(audio_path, audio_name, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed)
+                            process_single_file(audio_path, audio_name, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed, args.asr_model)
                         else:
                             display_info(f"Failed to download from URL: {url}", "error")
                 else:
@@ -2326,7 +2343,7 @@ if __name__ == "__main__":
                         else:
                             files_to_process.append(file_name)
                     if files_to_process:
-                        process_files_sequentially(files_to_process, audio_folder, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed)
+                        process_files_sequentially(files_to_process, audio_folder, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed, args.asr_model)
                     else:
                         display_info("[Auto] No files left to process.", "info")
                     # Skip menu in auto mode
@@ -2344,7 +2361,7 @@ if __name__ == "__main__":
                         
                         if choice == "1":
                             # Process all files in parallel
-                            process_files_sequentially(wav_files, audio_folder, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed)
+                            process_files_sequentially(wav_files, audio_folder, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed, args.asr_model)
                             break
                             
                         elif choice == "2":
@@ -2375,7 +2392,7 @@ if __name__ == "__main__":
                             
                             # Process selected files
                             if selected_files:
-                                process_files_sequentially(selected_files, audio_folder, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed)
+                                process_files_sequentially(selected_files, audio_folder, output_folder, args.noise_reduction, args.reduction_strength, args.skip_speed, args.asr_model)
                             break
                             
                         elif choice == "3":
