@@ -1574,9 +1574,68 @@ def download_youtube_audio(url: str, output_folder: str = "audio") -> str:
              
         return None
 
+def _find_deno_path() -> str:
+    """Find deno executable path, checking PATH and common install locations."""
+    import shutil
+    
+    # 1. Check if deno is already in PATH
+    deno = shutil.which('deno')
+    if deno:
+        return deno
+    
+    # 2. Check common install locations (Windows)
+    if sys.platform == 'win32':
+        candidates = [
+            os.path.expandvars(r'%USERPROFILE%\.deno\bin\deno.exe'),
+            os.path.expandvars(r'%LOCALAPPDATA%\deno\deno.exe'),
+        ]
+        # WinGet install location (glob for package hash)
+        winget_base = os.path.expandvars(r'%LOCALAPPDATA%\Microsoft\WinGet\Packages')
+        if os.path.isdir(winget_base):
+            for d in os.listdir(winget_base):
+                if 'Deno' in d:
+                    candidates.append(os.path.join(winget_base, d, 'deno.exe'))
+        
+        for path in candidates:
+            if os.path.isfile(path):
+                return path
+    
+    return None
+
+
+def _convert_json_cookies(json_path: str, output_path: str) -> None:
+    """Convert JSON cookies (from browser extension) to Netscape cookies.txt format."""
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    cookies = data.get('cookies', data) if isinstance(data, dict) else data
+    
+    lines = [
+        '# Netscape HTTP Cookie File',
+        '# https://curl.haxx.se/rfc/cookie_spec.html',
+        '# This is a generated file!  Do not edit.',
+        ''
+    ]
+    for c in cookies:
+        domain = c['domain']
+        flag = 'TRUE' if domain.startswith('.') else 'FALSE'
+        path = c.get('path', '/')
+        secure = 'TRUE' if c.get('secure', False) else 'FALSE'
+        exp = str(int(c.get('expirationDate', 0)))
+        name = c['name']
+        value = c['value']
+        lines.append(f'{domain}\t{flag}\t{path}\t{secure}\t{exp}\t{name}\t{value}')
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    
+    display_info(f"Converted {len(cookies)} cookies", "info")
+
+
 def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio", cookies_browser: str = None) -> str:
     """
     Download audio from a YouTube URL using yt-dlp and convert it to WAV format.
+    Tries multiple authentication strategies automatically.
     Returns the path to the downloaded audio file.
     """
     try:
@@ -1588,125 +1647,156 @@ def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio", cookies
             if file.endswith('.wav') or file.endswith('.mp3'):
                 os.remove(os.path.join(output_folder, file))
         
-        
         # Get User-Agent from .env or use a fallback
-        user_agent = os.getenv("YOUTUBE_USER_AGENT", 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        user_agent = os.getenv("YOUTUBE_USER_AGENT", 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
         
-        # Use yt-dlp to download best audio (ignore user config to avoid format conflicts)
-        ydl_opts = {
-            'format': 'bestaudio/best',  # Prefer audio-only but fall back to best
+        # Auto-detect deno runtime (required for YouTube JS challenge solving)
+        deno_path = _find_deno_path()
+        js_runtimes = {}
+        if deno_path:
+            js_runtimes = {'deno': {'path': deno_path}}
+            display_info(f"Using deno at: {deno_path}", "info")
+        
+        # Base yt-dlp options (auth will be added per-attempt)
+        base_opts = {
+            'format': 'bestaudio/best',
             'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
             'ignore_config': True,
-            # Enable remote JS challenge solver (required for modern YouTube)
             'remote_components': {'ejs:github'},
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'wav',
             }],
-            # Add headers and user agent to mimic browser
             'user_agent': user_agent,
             'http_headers': {
                 'User-Agent': user_agent,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             }
         }
+        if js_runtimes:
+            base_opts['js_runtimes'] = js_runtimes
         
-        # Add cookies if provided via global args (need to access args from main scope or pass it down)
-        # Assuming args is globally available or we modify the function signature to accept cookies_browser
-        # But to keep signature simple, let's check sys.argv for now as a hack or better: modify function signature
+        # Add PO Token and Visitor Data support from environment variables
+        po_token = os.getenv("YOUTUBE_PO_TOKEN")
+        visitor_data = os.getenv("YOUTUBE_VISITOR_DATA")
+        extractor_args = []
+        if po_token:
+            display_info("Using YouTube PO Token from .env", "info")
+            extractor_args.append(f"youtube:po_token=web+{po_token}")
+            extractor_args.append("youtube:player_client=web")
+        if visitor_data:
+            display_info("Using YouTube Visitor Data from .env", "info")
+            extractor_args.append(f"youtube:visitor_data={visitor_data}")
+        if extractor_args:
+            base_opts['extractor_args'] = {'youtube': extractor_args}
+
+        # --- Build ordered list of auth strategies ---
+        auth_strategies = []
         
-        # Checking command line args manually since we didn't update signature everywhere
+        # 1. Explicit --cookies-from-browser argument
         if cookies_browser:
-            # Handle Thorium browser explicitly as it's Chromium-based but not auto-detected by yt-dlp
             if cookies_browser.lower() == 'thorium':
-                # Thorium usually stores data in %LOCALAPPDATA%\Thorium\User Data
                 thorium_path = os.path.expandvars(r'%LOCALAPPDATA%\Thorium\User Data')
                 if os.path.exists(thorium_path):
-                    display_info(f"Using Thorium cookies from: {thorium_path}", "info")
-                    # Treat as chrome but point to Thorium profile
-                    ydl_opts['cookiesfrombrowser'] = ('chrome', thorium_path, None, None)
+                    auth_strategies.append(('Thorium browser cookies', {'cookiesfrombrowser': ('chrome', thorium_path, None, None)}))
                 else:
-                     display_info(f"Thorium profile not found at {thorium_path}. Trying default chrome detection...", "warning")
-                     ydl_opts['cookiesfrombrowser'] = ('chrome', None, None, None)
+                    auth_strategies.append(('Chrome cookies (Thorium fallback)', {'cookiesfrombrowser': ('chrome', None, None, None)}))
             else:
-                 ydl_opts['cookiesfrombrowser'] = (cookies_browser, None, None, None)
+                auth_strategies.append((f'{cookies_browser} browser cookies', {'cookiesfrombrowser': (cookies_browser, None, None, None)}))
         else:
-            # Fallback to checking sys.argv if not passed explicitly
-            import sys
+            # Check sys.argv for --cookies-from-browser
             if '--cookies-from-browser' in sys.argv:
                 try:
                     idx = sys.argv.index('--cookies-from-browser')
                     if idx + 1 < len(sys.argv):
                         browser = sys.argv[idx + 1]
                         if browser.lower() == 'thorium':
-                             thorium_path = os.path.expandvars(r'%LOCALAPPDATA%\Thorium\User Data')
-                             if os.path.exists(thorium_path):
-                                 display_info(f"Using Thorium cookies from: {thorium_path}", "info")
-                                 ydl_opts['cookiesfrombrowser'] = ('chrome', thorium_path, None, None)
-                             else:
-                                 ydl_opts['cookiesfrombrowser'] = ('chrome', None, None, None)
+                            thorium_path = os.path.expandvars(r'%LOCALAPPDATA%\Thorium\User Data')
+                            if os.path.exists(thorium_path):
+                                auth_strategies.append(('Thorium browser cookies', {'cookiesfrombrowser': ('chrome', thorium_path, None, None)}))
+                            else:
+                                auth_strategies.append(('Chrome cookies (Thorium fallback)', {'cookiesfrombrowser': ('chrome', None, None, None)}))
                         else:
-                            ydl_opts['cookiesfrombrowser'] = (browser, None, None, None)
+                            auth_strategies.append((f'{browser} browser cookies', {'cookiesfrombrowser': (browser, None, None, None)}))
                 except:
                     pass
         
-        # Check for cookies.txt as a fallback
-        if 'cookiesfrombrowser' not in ydl_opts:
-            cookies_file = "cookies.txt"
-            if os.path.exists(cookies_file):
-                 display_info(f"Using cookies from file: {cookies_file}", "info")
-                 ydl_opts['cookiefile'] = cookies_file
+        # 2. Auto-convert cookies_raw.json if it's newer than cookies.txt
+        cookies_file = "cookies.txt"
+        cookies_json = "cookies_raw.json"
+        if os.path.exists(cookies_json):
+            json_mtime = os.path.getmtime(cookies_json)
+            txt_mtime = os.path.getmtime(cookies_file) if os.path.exists(cookies_file) else 0
+            if json_mtime > txt_mtime:
+                display_info("Found newer cookies_raw.json, converting to cookies.txt...", "info")
+                try:
+                    _convert_json_cookies(cookies_json, cookies_file)
+                    display_info("cookies.txt updated from cookies_raw.json", "success")
+                except Exception as e:
+                    display_info(f"Failed to convert cookies_raw.json: {e}", "warning")
         
-        # Add PO Token and Visitor Data support from environment variables
-        po_token = os.getenv("YOUTUBE_PO_TOKEN")
-        visitor_data = os.getenv("YOUTUBE_VISITOR_DATA")
+        if os.path.exists(cookies_file):
+            auth_strategies.append(('cookies.txt file', {'cookiefile': cookies_file}))
         
-        extractor_args = []
-        if po_token:
-            display_info("Using YouTube PO Token from .env", "info")
-            # Usually requires specific client configuration, here we attempt a generic injection
-            # Reference: --extractor-args "youtube:player_skip=webpage,configs;visitor_data=VISITOR_DATA"
-            # Actual PO token usage often requires: "youtube:po_token=web+PO_TOKEN_VALUE"
-            extractor_args.append(f"youtube:po_token=web+{po_token}")
-            extractor_args.append("youtube:player_client=web")
-            
-        if visitor_data:
-            display_info("Using YouTube Visitor Data from .env", "info")
-            extractor_args.append(f"youtube:visitor_data={visitor_data}")
-            
-        if extractor_args:
-            ydl_opts['extractor_args'] = {'youtube': extractor_args}
-
-        info = None
-        last_error = None
-        # Try multiple format strings in order of preference
+        # 3. Auto-detect installed browsers (as fallback)
+        if not cookies_browser:
+            browser_paths = [
+                ('chrome', None),
+                ('edge', None),
+                ('firefox', None),
+                ('brave', None),
+            ]
+            for bname, bpath in browser_paths:
+                auth_strategies.append((f'{bname} browser (auto)', {'cookiesfrombrowser': (bname, bpath, None, None)}))
+        
+        # 4. No cookies (last resort, works for some public videos)
+        auth_strategies.append(('no authentication', {}))
+        
+        # --- Try each auth strategy with format fallbacks ---
         format_candidates = ['bestaudio/best', 'bestaudio*', 'best']
-        for fmt in format_candidates:
-            ydl_opts['format'] = fmt
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                break
-            except Exception as e:
-                last_error = e
-                err_str = str(e)
-                if 'Requested format is not available' in err_str:
-                    display_info(f"Format '{fmt}' unavailable, trying next fallback...", "warning")
-                    continue
+        last_error = None
+        info = None
+        
+        for strategy_name, auth_opts in auth_strategies:
+            display_info(f"Trying: {strategy_name}...", "info")
+            
+            for fmt in format_candidates:
+                ydl_opts = {**base_opts, **auth_opts, 'format': fmt}
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                    display_info(f"Success with: {strategy_name}", "success")
+                    break
+                except Exception as e:
+                    last_error = e
+                    err_str = str(e)
+                    if 'Requested format is not available' in err_str:
+                        continue  # Try next format
+                    break  # Auth error or other — try next strategy
+            
+            if info is not None:
+                break  # Download succeeded
+        
+        if info is None:
+            if last_error is not None:
+                err_str = str(last_error)
                 if 'Sign in to confirm' in err_str or 'bot' in err_str.lower():
-                    display_info("YouTube requires authentication. Please provide valid cookies.", "error")
-                    display_info("Use --cookies-from-browser <browser> or place a valid cookies.txt file.", "info")
-                    raise
-                raise
-
-        if info is None and last_error is not None:
-            raise last_error
+                    display_info("All authentication methods failed. YouTube requires fresh cookies.", "error")
+                    display_info("To fix this:", "info")
+                    display_info("1. Open your browser and go to youtube.com (make sure you're logged in)", "info")
+                    display_info("2. Install the 'Get cookies.txt LOCALLY' browser extension", "info")
+                    display_info("3. Click the extension icon on youtube.com and export cookies", "info")
+                    display_info("4. Save/replace the cookies.txt file in this folder: " + os.path.abspath('.'), "info")
+                    display_info("5. Close the browser completely and run this tool again", "info")
+                raise last_error
+            else:
+                display_info("Download failed for unknown reasons.", "error")
+                return None
 
         title = info.get('title', 'audio')
-        # Clean the title to make it safe for filenames
         title = re.sub(r'[^\w\s-]', '', title)
         title = re.sub(r'[-\s]+', '-', title).strip('-_')
 
@@ -1714,12 +1804,9 @@ def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio", cookies
         wav_files = [f for f in os.listdir(output_folder) if f.endswith('.wav')]
         if wav_files:
             wav_path = os.path.join(output_folder, wav_files[0])
-
-            # Process the downloaded audio for volume
             audio = AudioSegment.from_file(wav_path)
             audio = normalize_audio(audio)
             audio.export(wav_path, format="wav")
-
             display_info(f"✓ Audio downloaded, converted and normalized successfully: {wav_path}", "success")
             return wav_path
         else:
