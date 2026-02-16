@@ -36,6 +36,7 @@ from pytube import YouTube
 import re
 import yt_dlp
 import requests
+import json
 import warnings
 from dotenv import load_dotenv
 import random
@@ -1559,10 +1560,21 @@ def download_youtube_audio(url: str, output_folder: str = "audio") -> str:
         return wav_path
         
     except Exception as e:
-        display_info(f"\nError downloading YouTube audio: {str(e)}", "error")
+        error_msg = str(e)
+        display_info(f"\nError downloading YouTube audio: {error_msg}", "error")
+        
+        if "Sign in to confirm" in error_msg or "confirm you're not a bot" in error_msg:
+             display_info("\n[AUTHENTICATION REQUIRED]", "warning")
+             display_info("YouTube is blocking the request. To fix this:", "info")
+             display_info("1. Open an INCOGNITO/PRIVATE browser window.", "info")
+             display_info("2. Log in to YouTube.", "info")
+             display_info("3. Install a 'Get cookies.txt' extension.", "info")
+             display_info("4. Export cookies as 'cookies.txt' to this folder.", "info")
+             display_info("5. Close the browser and run this tool again.", "info")
+             
         return None
 
-def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio") -> str:
+def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio", cookies_browser: str = None) -> str:
     """
     Download audio from a YouTube URL using yt-dlp and convert it to WAV format.
     Returns the path to the downloaded audio file.
@@ -1576,42 +1588,143 @@ def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio") -> str:
             if file.endswith('.wav') or file.endswith('.mp3'):
                 os.remove(os.path.join(output_folder, file))
         
-        # Use yt-dlp to download best audio
+        
+        # Get User-Agent from .env or use a fallback
+        user_agent = os.getenv("YOUTUBE_USER_AGENT", 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        
+        # Use yt-dlp to download best audio (ignore user config to avoid format conflicts)
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': 'bestaudio/best',  # Prefer audio-only but fall back to best
             'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
+            'ignore_config': True,
+            # Enable remote JS challenge solver (required for modern YouTube)
+            'remote_components': {'ejs:github'},
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'wav',
-                'preferredquality': '192',
             }],
+            # Add headers and user agent to mimic browser
+            'user_agent': user_agent,
+            'http_headers': {
+                'User-Agent': user_agent,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            }
         }
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = info.get('title', 'audio')
-            # Clean the title to make it safe for filenames
-            title = re.sub(r'[^\w\s-]', '', title)
-            title = re.sub(r'[-\s]+', '-', title).strip('-_')
-            
-            # Look for the WAV file in the output folder
-            wav_files = [f for f in os.listdir(output_folder) if f.endswith('.wav')]
-            if wav_files:
-                wav_path = os.path.join(output_folder, wav_files[0])
-                
-                # Process the downloaded audio for volume
-                audio = AudioSegment.from_file(wav_path)
-                audio = normalize_audio(audio)
-                audio.export(wav_path, format="wav")
-                
-                display_info(f"✓ Audio downloaded, converted and normalized successfully: {wav_path}", "success")
-                return wav_path
+        # Add cookies if provided via global args (need to access args from main scope or pass it down)
+        # Assuming args is globally available or we modify the function signature to accept cookies_browser
+        # But to keep signature simple, let's check sys.argv for now as a hack or better: modify function signature
+        
+        # Checking command line args manually since we didn't update signature everywhere
+        if cookies_browser:
+            # Handle Thorium browser explicitly as it's Chromium-based but not auto-detected by yt-dlp
+            if cookies_browser.lower() == 'thorium':
+                # Thorium usually stores data in %LOCALAPPDATA%\Thorium\User Data
+                thorium_path = os.path.expandvars(r'%LOCALAPPDATA%\Thorium\User Data')
+                if os.path.exists(thorium_path):
+                    display_info(f"Using Thorium cookies from: {thorium_path}", "info")
+                    # Treat as chrome but point to Thorium profile
+                    ydl_opts['cookiesfrombrowser'] = ('chrome', thorium_path, None, None)
+                else:
+                     display_info(f"Thorium profile not found at {thorium_path}. Trying default chrome detection...", "warning")
+                     ydl_opts['cookiesfrombrowser'] = ('chrome', None, None, None)
             else:
-                display_info("Failed to find the downloaded WAV file.", "warning")
-                return None
+                 ydl_opts['cookiesfrombrowser'] = (cookies_browser, None, None, None)
+        else:
+            # Fallback to checking sys.argv if not passed explicitly
+            import sys
+            if '--cookies-from-browser' in sys.argv:
+                try:
+                    idx = sys.argv.index('--cookies-from-browser')
+                    if idx + 1 < len(sys.argv):
+                        browser = sys.argv[idx + 1]
+                        if browser.lower() == 'thorium':
+                             thorium_path = os.path.expandvars(r'%LOCALAPPDATA%\Thorium\User Data')
+                             if os.path.exists(thorium_path):
+                                 display_info(f"Using Thorium cookies from: {thorium_path}", "info")
+                                 ydl_opts['cookiesfrombrowser'] = ('chrome', thorium_path, None, None)
+                             else:
+                                 ydl_opts['cookiesfrombrowser'] = ('chrome', None, None, None)
+                        else:
+                            ydl_opts['cookiesfrombrowser'] = (browser, None, None, None)
+                except:
+                    pass
+        
+        # Check for cookies.txt as a fallback
+        if 'cookiesfrombrowser' not in ydl_opts:
+            cookies_file = "cookies.txt"
+            if os.path.exists(cookies_file):
+                 display_info(f"Using cookies from file: {cookies_file}", "info")
+                 ydl_opts['cookiefile'] = cookies_file
+        
+        # Add PO Token and Visitor Data support from environment variables
+        po_token = os.getenv("YOUTUBE_PO_TOKEN")
+        visitor_data = os.getenv("YOUTUBE_VISITOR_DATA")
+        
+        extractor_args = []
+        if po_token:
+            display_info("Using YouTube PO Token from .env", "info")
+            # Usually requires specific client configuration, here we attempt a generic injection
+            # Reference: --extractor-args "youtube:player_skip=webpage,configs;visitor_data=VISITOR_DATA"
+            # Actual PO token usage often requires: "youtube:po_token=web+PO_TOKEN_VALUE"
+            extractor_args.append(f"youtube:po_token=web+{po_token}")
+            extractor_args.append("youtube:player_client=web")
+            
+        if visitor_data:
+            display_info("Using YouTube Visitor Data from .env", "info")
+            extractor_args.append(f"youtube:visitor_data={visitor_data}")
+            
+        if extractor_args:
+            ydl_opts['extractor_args'] = {'youtube': extractor_args}
+
+        info = None
+        last_error = None
+        # Try multiple format strings in order of preference
+        format_candidates = ['bestaudio/best', 'bestaudio*', 'best']
+        for fmt in format_candidates:
+            ydl_opts['format'] = fmt
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                break
+            except Exception as e:
+                last_error = e
+                err_str = str(e)
+                if 'Requested format is not available' in err_str:
+                    display_info(f"Format '{fmt}' unavailable, trying next fallback...", "warning")
+                    continue
+                if 'Sign in to confirm' in err_str or 'bot' in err_str.lower():
+                    display_info("YouTube requires authentication. Please provide valid cookies.", "error")
+                    display_info("Use --cookies-from-browser <browser> or place a valid cookies.txt file.", "info")
+                    raise
+                raise
+
+        if info is None and last_error is not None:
+            raise last_error
+
+        title = info.get('title', 'audio')
+        # Clean the title to make it safe for filenames
+        title = re.sub(r'[^\w\s-]', '', title)
+        title = re.sub(r'[-\s]+', '-', title).strip('-_')
+
+        # Look for the WAV file in the output folder
+        wav_files = [f for f in os.listdir(output_folder) if f.endswith('.wav')]
+        if wav_files:
+            wav_path = os.path.join(output_folder, wav_files[0])
+
+            # Process the downloaded audio for volume
+            audio = AudioSegment.from_file(wav_path)
+            audio = normalize_audio(audio)
+            audio.export(wav_path, format="wav")
+
+            display_info(f"✓ Audio downloaded, converted and normalized successfully: {wav_path}", "success")
+            return wav_path
+        else:
+            display_info("Failed to find the downloaded WAV file.", "warning")
+            return None
                 
     except Exception as e:
         display_info(f"\nError downloading YouTube audio with yt-dlp: {str(e)}", "error")
@@ -1650,7 +1763,7 @@ def check_gemini_availability() -> bool:
         }
         
         model = genai.GenerativeModel(
-            model_name='gemini-2.5-flash-preview-05-20',
+            model_name='gemini-3-flash-preview',
             generation_config=generation_config
         )
         
@@ -1712,14 +1825,26 @@ def process_transcript_with_ollama(transcript_text: str) -> str:
             json={
                 "model": LOCAL_MODEL_NAME,
                 "prompt": prompt,
-                "stream": False
+                "stream": True  # Enable streaming to prevent timeouts
             },
-            timeout=(5, 120)  # 5s connect, 120s read
+            stream=True,  # Enable streaming in requests
+            timeout=(5, 60)  # 5s connect, 60s read (time to first byte)
         )
         
         if response.status_code == 200:
-            result = response.json()
-            full_response = result.get('response', '').strip()
+            full_response = ""
+            for line in response.iter_lines():
+                if line:
+                    try:
+                        body = json.loads(line)
+                        chunk = body.get('response', '')
+                        full_response += chunk
+                        if body.get('done', False):
+                            break
+                    except json.JSONDecodeError:
+                        continue
+            
+            full_response = full_response.strip()
             if full_response:
                 display_info(f"✓ {LOCAL_MODEL_NAME} processing completed successfully!", "success")
                 return full_response
@@ -2475,7 +2600,17 @@ def download_from_url(url: str, output_folder: str = "audio") -> str:
     try:
         if "youtube.com" in url or "youtu.be" in url:
             display_info("Detected YouTube URL", "info")
-            return download_youtube_audio_ytdlp(url, output_folder)
+            # Parse cookies_browser from sys.argv manually if not passed (hack since we didn't update signature everywhere)
+            cookies_browser = None
+            if len(sys.argv) > 1 and '--cookies-from-browser' in sys.argv:
+                try:
+                    idx = sys.argv.index('--cookies-from-browser')
+                    if idx + 1 < len(sys.argv):
+                        cookies_browser = sys.argv[idx + 1]
+                except:
+                    pass
+            
+            return download_youtube_audio_ytdlp(url, output_folder, cookies_browser)
         elif "drive.google.com" in url:
             display_info("Detected Google Drive URL", "info")
             result = download_google_drive_file(url, output_folder)
@@ -2496,6 +2631,7 @@ if __name__ == "__main__":
     parser.add_argument('--noise-reduction', action='store_true', help='Apply noise reduction preprocessing')
     parser.add_argument('--reduction-strength', type=float, default=0.5, help='Noise reduction strength (0.0-1.0, default: 0.5)')
     parser.add_argument('--skip-speed', action='store_true', help='Skip speed optimization for faster processing')
+    parser.add_argument('--cookies-from-browser', type=str, default=None, help='Browser to extract cookies from (e.g. chrome, firefox) to bypass YouTube restrictions')
     args, unknown = parser.parse_known_args()
 
     audio_folder = "audio"
