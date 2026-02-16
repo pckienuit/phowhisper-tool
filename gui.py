@@ -8,7 +8,7 @@ from phowhisper import (
     convert_youtube_url,
     download_youtube_audio_ytdlp,
     transcribe_audio,
-    process_transcript_with_gemini,
+    process_transcript_with_llm,
     ask_gemini_question,
     cleanup_audio_folder,
     detect_audio_language,
@@ -258,7 +258,7 @@ class ReprocessWindow(tk.Toplevel):
                     transcript_text = f.read()
                 
                 # Process with Gemini
-                processed_text = process_transcript_with_gemini(transcript_text)
+                processed_text = process_transcript_with_llm(transcript_text)
                 
                 # Save processed output
                 base_name = os.path.splitext(os.path.basename(file_path))[0]

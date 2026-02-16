@@ -14,7 +14,7 @@
     },
     {
         "domain": ".youtube.com",
-        "expirationDate": 1802767294.524605,
+        "expirationDate": 1802768498.741906,
         "hostOnly": false,
         "httpOnly": true,
         "name": "__Secure-1PSIDTS",
@@ -23,7 +23,7 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "sidts-CjQBBj1CYi2dumfCYVsoZaJboM2gth-VmQ-mPHgXoVFKx2qidt4HQpVEkpWYZnzrO0vBca9pEAA"
+        "value": "sidts-CjQBBj1CYu8jHxQ0xaviU_obplz4ujIifOv92ReyDmRgNzZkP8Sk7tdQ2faBfeLZfEVFMiW2EAA"
     },
     {
         "domain": ".youtube.com",
@@ -40,7 +40,7 @@
     },
     {
         "domain": ".youtube.com",
-        "expirationDate": 1802767294.524717,
+        "expirationDate": 1802768498.742184,
         "hostOnly": false,
         "httpOnly": true,
         "name": "__Secure-1PSIDCC",
@@ -49,7 +49,7 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "AKEyXzV2gY316i9bjNF_rdi_Pc8Fj6tO2HYRBFcqpPAqZOhI4IoY0hYm3eRuTpRpNETkPIaJCdQ"
+        "value": "AKEyXzXYlfSpMr6pRgzhxedcKvmxmqAXvL4_CpSNODxaA3o9Bk_pky5roKm3I-RGpQAI-IYbweg"
     },
     {
         "domain": ".youtube.com",
@@ -105,7 +105,7 @@
     },
     {
         "domain": ".youtube.com",
-        "expirationDate": 1802767294.524734,
+        "expirationDate": 1802768498.742215,
         "hostOnly": false,
         "httpOnly": true,
         "name": "__Secure-3PSIDCC",
@@ -114,11 +114,11 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "AKEyXzWTrPR1JUwdCbJR5xiia2h6fmHMYZ1VSx4uWUYSRJJj00fgETPujOyLY-D11tArl5-Q2bc"
+        "value": "AKEyXzVbIq9M1qJGJJhl_ykRAfQAM_WHkS-9BmvvmRPxb-5zErXFvAoF-6Gevh80XALiPD6xD5I"
     },
     {
         "domain": ".youtube.com",
-        "expirationDate": 1802767294.524673,
+        "expirationDate": 1802768498.742105,
         "hostOnly": false,
         "httpOnly": true,
         "name": "__Secure-3PSIDTS",
@@ -127,7 +127,7 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "sidts-CjQBBj1CYi2dumfCYVsoZaJboM2gth-VmQ-mPHgXoVFKx2qidt4HQpVEkpWYZnzrO0vBca9pEAA"
+        "value": "sidts-CjQBBj1CYu8jHxQ0xaviU_obplz4ujIifOv92ReyDmRgNzZkP8Sk7tdQ2faBfeLZfEVFMiW2EAA"
     },
     {
         "domain": ".youtube.com",
