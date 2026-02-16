@@ -54,6 +54,11 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found in .env file")
 
+# --- Local LLM (Ollama) Configuration ---
+OLLAMA_API_URL = "http://localhost:11434/api/generate"
+LOCAL_MODEL_NAME = "gemma3:12b"
+
+
 # --- Gemini API Compatibility Layer ---
 # Supports both google.genai (new) and google.generativeai (old/deprecated)
 _USE_NEW_GENAI = False
@@ -1684,6 +1689,48 @@ def get_gemini_model():
         )
     return _gemini_model
 
+def process_transcript_with_ollama(transcript_text: str) -> str:
+    """
+    Process transcript using local Ollama instance (Gemma 3).
+    """
+    try:
+        # Load prompt template (reusing logic from process_transcript_with_gemini)
+        prompt_path = "system_prompt.txt"
+        if os.path.exists(prompt_path):
+            with open(prompt_path, 'r', encoding='utf-8') as f:
+                prompt_template = f.read()
+        else:
+            # Fallback inline prompt if file missing
+            prompt_template = "Bạn là một trợ lý AI giúp sửa lỗi bản ghi âm tiếng Việt. Hãy sửa lỗi chính tả, ngữ pháp và làm văn bản mạch lạc hơn nhưng không thay đổi nội dung gốc."
+        
+        prompt = f"{prompt_template}\n\nBản ghi âm:\n{transcript_text}"
+        
+        display_info(f"Processing with Local LLM ({LOCAL_MODEL_NAME})...", "info")
+        
+        response = requests.post(
+            OLLAMA_API_URL,
+            json={
+                "model": LOCAL_MODEL_NAME,
+                "prompt": prompt,
+                "stream": False
+            },
+            timeout=(5, 120)  # 5s connect, 120s read
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            full_response = result.get('response', '').strip()
+            if full_response:
+                display_info(f"✓ {LOCAL_MODEL_NAME} processing completed successfully!", "success")
+                return full_response
+        
+        display_info(f"Ollama returned status code {response.status_code}", "warning")
+        return None
+        
+    except Exception as e:
+        display_info(f"Ollama processing failed: {str(e)}", "warning")
+        return None
+
 def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_delay=30) -> str:
     """
     Process transcribed text using Gemini with streaming output.
@@ -2048,13 +2095,24 @@ def process_single_file(audio_path: str, audio_name: str, output_folder: str, no
         display_info(f"\nFile {audio_name} has already been processed. Skipping...", "info")
         return
     elif is_converted:
-        display_info(f"\nFile {audio_name} has been transcribed but not processed with Gemini. Processing with Gemini...", "info")
+        display_info(f"\nFile {audio_name} has been transcribed but not refined. Refining transcript...", "info")
         with open(transcript_file, "r", encoding="utf-8") as f:
             output_text = f.read()
-        processed_text = process_transcript_with_gemini(output_text)
-        with open(processed_file, "w", encoding="utf-8") as f:
-            f.write(processed_text)
-        display_info(f"✓ Processed output saved to: {processed_file}", "success")
+        
+        # Try Gemma first
+        processed_text = process_transcript_with_ollama(output_text)
+        
+        # Fallback to Gemini if Gemma failed
+        if not processed_text:
+            display_info("Falling back to Gemini for transcript refinement...", "info")
+            processed_text = process_transcript_with_gemini(output_text)
+
+        if processed_text:
+            with open(processed_file, "w", encoding="utf-8") as f:
+                f.write(processed_text)
+            display_info(f"✓ Processed output saved to: {processed_file}", "success")
+        else:
+            display_info("Failed to refine transcript with any model.", "error")
     else:
         display_info(f"\nProcessing new file: {audio_name}", "info")
         
@@ -2100,11 +2158,20 @@ def process_single_file(audio_path: str, audio_name: str, output_folder: str, no
         with open(transcript_file, "w", encoding="utf-8") as f:
             f.write(output_text)
         display_info(f"✓ Raw transcript saved to: {transcript_file}", "success")
-        display_info("Processing with Gemini...", "info")
-        processed_text = process_transcript_with_gemini(output_text)
-        with open(processed_file, "w", encoding="utf-8") as f:
-            f.write(processed_text)
-        display_info(f"✓ Processed output saved to: {processed_file}", "success")
+        
+        # Transcript refinement orchestration
+        processed_text = process_transcript_with_ollama(output_text)
+        
+        if not processed_text:
+            display_info("Gemma processing failed or unavailable. Falling back to Gemini...", "warning")
+            processed_text = process_transcript_with_gemini(output_text)
+            
+        if processed_text:
+            with open(processed_file, "w", encoding="utf-8") as f:
+                f.write(processed_text)
+            display_info(f"✓ Processed output saved to: {processed_file}", "success")
+        else:
+            display_info("Failed to refine transcript with any model.", "error")
 
 def find_optimal_audio_speed(clean_wav_path: str) -> float:
     """
