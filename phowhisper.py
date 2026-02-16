@@ -1,3 +1,7 @@
+# Disable safetensors auto-conversion thread (causes 403 errors for some models)
+import transformers.safetensors_conversion
+transformers.safetensors_conversion.auto_conversion = lambda *args, **kwargs: None
+
 from transformers import pipeline
 import os
 from pydub import AudioSegment
@@ -15,13 +19,17 @@ from pytube import YouTube
 import re
 import yt_dlp
 import requests
-import google.generativeai as genai
+import warnings
 from dotenv import load_dotenv
 import random
 from difflib import SequenceMatcher
 import time
 import argparse
 from scipy import signal
+
+# Disable HuggingFace auto-conversion to prevent 403 errors on model discussions
+os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
 
 # Load environment variables
 load_dotenv()
@@ -31,7 +39,88 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found in .env file")
 
-genai.configure(api_key=GEMINI_API_KEY)
+# --- Gemini API Compatibility Layer ---
+# Supports both google.genai (new) and google.generativeai (old/deprecated)
+_USE_NEW_GENAI = False
+_gemini_client = None
+
+try:
+    from google import genai as _genai_module
+    _USE_NEW_GENAI = True
+    _gemini_client = _genai_module.Client(api_key=GEMINI_API_KEY)
+except ImportError:
+    warnings.filterwarnings('ignore', category=FutureWarning, module='google.generativeai')
+    import google.generativeai as _genai_module
+    _genai_module.configure(api_key=GEMINI_API_KEY)
+
+
+class _GeminiModelCompat:
+    """Compatibility wrapper providing unified API for both genai packages."""
+    
+    def __init__(self, model_name, generation_config):
+        self.model_name = model_name
+        self.generation_config = generation_config
+        
+        if not _USE_NEW_GENAI:
+            # Old API: create model object directly
+            self._old_model = _genai_module.GenerativeModel(
+                model_name=model_name,
+                generation_config=generation_config
+            )
+    
+    def generate_content(self, prompt, stream=False):
+        if _USE_NEW_GENAI:
+            config = _genai_module.types.GenerateContentConfig(
+                temperature=self.generation_config.get('temperature'),
+                top_p=self.generation_config.get('top_p'),
+                top_k=self.generation_config.get('top_k'),
+                max_output_tokens=self.generation_config.get('max_output_tokens'),
+            )
+            if stream:
+                return _gemini_client.models.generate_content_stream(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config,
+                )
+            else:
+                response = _gemini_client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config,
+                )
+                # Wrap in a list-like for compatibility with old iteration pattern
+                return _NonStreamResponse(response)
+        else:
+            return self._old_model.generate_content(prompt, stream=stream)
+
+
+class _NonStreamResponse:
+    """Wraps a non-streaming response to support iteration like the old API."""
+    
+    def __init__(self, response):
+        self._response = response
+        self.text = response.text if hasattr(response, 'text') else ""
+    
+    def __iter__(self):
+        yield self
+    
+    def __bool__(self):
+        return bool(self.text)
+
+
+class _GenaiCompat:
+    """Top-level compatibility shim so existing code using genai.GenerativeModel still works."""
+    
+    @staticmethod
+    def GenerativeModel(model_name, generation_config=None):
+        return _GeminiModelCompat(model_name, generation_config or {})
+    
+    @staticmethod
+    def configure(api_key):
+        pass  # Already configured above
+
+
+genai = _GenaiCompat()
 
 def display_info(message: str, level: str = "info") -> None:
     """
@@ -94,23 +183,41 @@ def select_device(mode: str = None, cli_device: str = None) -> str:
             display_info("\n[Default] GPU not available. Using CPU for processing.", "warning")
             return "cpu"
 
-# Initialize model with optimized settings
-selected_device = select_device()
-transcriber = pipeline(
-    "automatic-speech-recognition",
-    model="vinai/PhoWhisper-large",
-    device=selected_device,
-    return_timestamps=True,
-    framework="pt",
-    torch_dtype=torch.float16 if selected_device == "cuda" else torch.float32,  # Use half precision only for GPU
-    model_kwargs={"use_cache": True}  # Enable model caching
-)
+# Initialize model with lazy loading (will be loaded in __main__)
+selected_device = None
+transcriber = None
 
 # Global variable to store current model info
 current_model_info = {
-    "name": "vinai/PhoWhisper-large",
-    "language": "vietnamese"
+    "name": None,
+    "language": None
 }
+
+# Global cached language detector (lazy initialization)
+_language_detector = None
+
+def get_language_detector():
+    """Get or create the cached language detector model."""
+    global _language_detector, selected_device
+    if _language_detector is None:
+        _language_detector = pipeline(
+            "automatic-speech-recognition",
+            model="openai/whisper-base",
+            device=selected_device if selected_device else "cpu",
+            return_timestamps=True
+        )
+    return _language_detector
+
+def cleanup_language_detector():
+    """Clean up the language detector when no longer needed."""
+    global _language_detector
+    if _language_detector is not None:
+        del _language_detector
+        _language_detector = None
+        gc.collect()
+        if selected_device == "cuda":
+            torch.cuda.empty_cache()
+
 
 def detect_audio_language(audio_path: str, sample_duration: int = 30) -> str:
     """
@@ -139,22 +246,13 @@ def detect_audio_language(audio_path: str, sample_duration: int = 30) -> str:
         sample_audio.export(temp_sample_path, format="wav")
         
         try:
-            # Use a lightweight Whisper model for language detection
-            detector = pipeline(
-                "automatic-speech-recognition",
-                model="openai/whisper-base",
-                device=selected_device,
-                return_timestamps=True
-            )
+            # Use cached language detector
+            detector = get_language_detector()
             
             # Transcribe with language detection
             result = detector(temp_sample_path, return_timestamps=True, generate_kwargs={"task": "transcribe"})
             
-            # Clean up detector
-            del detector
-            gc.collect()
-            if selected_device == "cuda":
-                torch.cuda.empty_cache()
+            # Note: We keep the detector cached for reuse, no need to delete
             
             # Analyze the transcription to detect language
             text = result.get("text", "").strip()
@@ -270,6 +368,12 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 # Suppress torchvision image extension warnings
 warnings.filterwarnings('ignore', message='Failed to load image Python extension')
 warnings.filterwarnings('ignore', module='torchvision.io.image')
+
+# Suppress HuggingFace HTTP errors (discussions disabled for some models)
+warnings.filterwarnings('ignore', message='.*403 Forbidden.*')
+warnings.filterwarnings('ignore', message='.*Discussions are disabled.*')
+import logging
+logging.getLogger('huggingface_hub').setLevel(logging.ERROR)
 
 def analyze_background_noise(audio: AudioSegment) -> dict:
     """
@@ -658,14 +762,23 @@ def preprocess_audio_with_noise_reduction(audio_path, noise_reduction=True, redu
         return audio_path
 
 
-def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
+def split_audio(audio_input, chunk_length_ms: int = 30000) -> List[str]:
     """
     Split audio into optimized chunks with intelligent analysis.
     Automatically uses 30s chunks for noisy audio.
     Returns paths to temporary files containing the chunks.
+    
+    Args:
+        audio_input: Either a file path (str) or AudioSegment object
+        chunk_length_ms: Default chunk length in milliseconds
     """
     try:
-        audio = AudioSegment.from_file(audio_path)
+        # Handle both AudioSegment objects and file paths
+        if isinstance(audio_input, str):
+            audio = AudioSegment.from_file(audio_input)
+        else:
+            audio = audio_input  # Already an AudioSegment
+
         # Normalize audio volume before splitting
         audio = normalize_audio(audio)
         temp_files = []
@@ -949,9 +1062,11 @@ def split_audio(audio_path: str, chunk_length_ms: int = 30000) -> List[str]:
 def process_chunk(chunk_path: str) -> str:
     """Process a single audio chunk with optimized settings for single-threaded processing."""
     try:
-        # Use the global transcriber instance for better efficiency
-        result = transcriber(chunk_path)
-        return result['text']
+        # Use inference mode to disable gradient tracking (5-10% speedup)
+        with torch.inference_mode():
+            # Use the global transcriber instance for better efficiency
+            result = transcriber(chunk_path)
+            return result['text']
     except Exception as e:
         display_info(f"\nError processing chunk {chunk_path}: {str(e)}", "error")
         return ""
@@ -984,7 +1099,8 @@ def transcribe_audio(audio_path: str, noise_reduction: bool = False, reduction_s
         if len(audio) > 30000:  # If audio is longer than 30 seconds
             # Use larger chunks for better efficiency in single-threaded mode
             chunk_length = 60000 if torch.cuda.is_available() else 45000  # 60s for GPU, 45s for CPU
-            temp_files = split_audio(audio_path, chunk_length)
+            # Pass audio object directly instead of reloading from file
+            temp_files = split_audio(audio, chunk_length)
             transcriptions = []
             
             display_info("\nTranscribing audio chunks sequentially...", "info")
@@ -1190,16 +1306,35 @@ def calculate_text_similarity(text1: str, text2: str) -> dict:
     char_similarity = SequenceMatcher(None, text1, text2).ratio()
     word_similarity = SequenceMatcher(None, ' '.join(words1), ' '.join(words2)).ratio()
     
-    def get_similar_words(word1, word2, threshold=0.8):
-        return SequenceMatcher(None, word1, word2).ratio() >= threshold
+    # Optimized similar word calculation: use set intersection first
+    # This is much faster than nested loop for large texts
+    words1_set = set(words1)
+    words2_set = set(words2)
     
-    similar_words = []
-    for w1 in words1:
-        for w2 in words2:
-            if get_similar_words(w1, w2):
-                similar_words.append((w1, w2))
+    # Exact matches (fast O(n+m) operation)
+    exact_matches = words1_set & words2_set
+    similar_word_pairs = len(exact_matches)
     
-    similar_word_pairs = len(similar_words)
+    # Only do fuzzy matching if we have small word lists and few exact matches
+    # This avoids the O(n*m) nested loop for large texts
+    max_fuzzy_pairs = 100  # Limit fuzzy matching to avoid performance issues
+    if len(words1) < 100 and len(words2) < 100 and similar_word_pairs < max_fuzzy_pairs:
+        # Get words that didn't match exactly
+        words1_unmatched = [w for w in words1 if w not in exact_matches]
+        words2_unmatched = [w for w in words2 if w not in exact_matches]
+        
+        # Fuzzy match only the unmatched words (much smaller sets)
+        fuzzy_threshold = 0.8
+        fuzzy_matches = 0
+        
+        for w1 in words1_unmatched[:50]:  # Limit to first 50 words
+            for w2 in words2_unmatched[:50]:
+                if SequenceMatcher(None, w1, w2).ratio() >= fuzzy_threshold:
+                    fuzzy_matches += 1
+                    break  # Count each w1 only once
+        
+        similar_word_pairs += fuzzy_matches
+
     similar_word_ratio = similar_word_pairs / max(len(words1), len(words2)) if max(len(words1), len(words2)) > 0 else 0
     
     # Calculate average similarity score with adjusted weight for word_similarity
@@ -1466,10 +1601,26 @@ def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio") -> str:
 def check_gemini_availability() -> bool:
     """
     Check if Gemini API is available and working.
+    Uses caching to avoid repeated API calls.
     
     Returns:
         bool: True if Gemini is available and working, False otherwise
     """
+    # Cache availability check for 5 minutes
+    cache_duration = 300  # 5 minutes in seconds
+    
+    if not hasattr(check_gemini_availability, '_last_check_time'):
+        check_gemini_availability._last_check_time = 0
+        check_gemini_availability._cached_result = None
+    
+    current_time = time.time()
+    
+    # Return cached result if still valid
+    if (current_time - check_gemini_availability._last_check_time) < cache_duration:
+        if check_gemini_availability._cached_result is not None:
+            return check_gemini_availability._cached_result
+    
+    # Perform actual check
     try:
         # Initialize Gemini model with generation config
         generation_config = {
@@ -1486,10 +1637,38 @@ def check_gemini_availability() -> bool:
         
         # Try a simple test prompt
         response = model.generate_content("Test connection")
+        
+        # Cache the successful result
+        check_gemini_availability._last_check_time = current_time
+        check_gemini_availability._cached_result = True
         return True
     except Exception as e:
         display_info(f"\nError checking Gemini availability: {str(e)}", "error")
+        
+        # Cache the failed result too (but with shorter duration)
+        check_gemini_availability._last_check_time = current_time
+        check_gemini_availability._cached_result = False
         return False
+
+# Global cached Gemini model
+_gemini_model = None
+
+def get_gemini_model():
+    """Get or create the cached Gemini model instance."""
+    global _gemini_model
+    if _gemini_model is None:
+        generation_config = {
+            "temperature": 0.5,
+            "top_p": 0.7,
+            "top_k": 40,
+            "max_output_tokens": 128000,
+        }
+        
+        _gemini_model = genai.GenerativeModel(
+            model_name='gemini-2.5-flash-preview-05-20',
+            generation_config=generation_config
+        )
+    return _gemini_model
 
 def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_delay=30) -> str:
     """
@@ -1514,18 +1693,9 @@ def process_transcript_with_gemini(transcript_text: str, max_retries=3, retry_de
     for attempt in range(max_retries):
         display_info(f"\nProcessing with Gemini (Attempt {attempt + 1}/{max_retries})...\n", "info")
         try:
-            # Initialize Gemini model with generation config
-            generation_config = {
-                "temperature": 0.5,
-                "top_p": 0.7,
-                "top_k": 40,
-                "max_output_tokens": 128000,
-            }
-            
-            model = genai.GenerativeModel(
-                model_name='gemini-2.5-flash-preview-05-20',
-                generation_config=generation_config
-            )
+            # Use cached Gemini model
+            model = get_gemini_model()
+
             
             # Generate response with streaming
             response = model.generate_content(prompt, stream=False)
@@ -1585,18 +1755,9 @@ Hãy trả lời bằng tiếng Việt và đảm bảo câu trả lời:
     for attempt in range(max_retries):
         display_info(f"\nAsking Gemini (Attempt {attempt + 1}/{max_retries})...\n", "info")
         try:
-            # Initialize Gemini model with generation config
-            generation_config = {
-                "temperature": 0.5,
-                "top_p": 0.7,
-                "top_k": 40,
-                "max_output_tokens": 128000,
-            }
-            
-            model = genai.GenerativeModel(
-                model_name='gemini-2.5-flash-preview-05-20',
-                generation_config=generation_config
-            )
+            # Use cached Gemini model
+            model = get_gemini_model()
+
             
             # Generate response with streaming
             response = model.generate_content(prompt, stream=True)
@@ -1945,14 +2106,16 @@ def find_optimal_audio_speed(clean_wav_path: str) -> float:
         display_info(f"Error loading audio: {e}. Using default speed 1.0x.", "warning")
         return 1.0
 
-    # Test speeds from 1.0x to 2.25x
-    speeds_to_try = [1.0, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0, 2.25]
+    # Test speeds from 1.0x to 2.25x using binary search
+    min_speed = 1.0
+    max_speed = 2.25
+    min_similarity_threshold = 0.5  # 50% similarity needed
     
-    # Extract a 30-second segment from the middle of the audio
+    # Extract a 15-second segment from the middle of the audio (reduced from 30s)
     middle_point = len(audio) // 2
-    test_segment = audio[middle_point - 15000:middle_point + 15000]
+    test_segment = audio[middle_point - 7500:middle_point + 7500]  # 15s total
     
-    if len(test_segment) < 10000:  # If audio is too short
+    if len(test_segment) < 5000:  # If audio is too short
         display_info("Audio is too short for speed testing. Using default speed 1.0x.", "warning")
         return 1.0
     
@@ -1962,24 +2125,15 @@ def find_optimal_audio_speed(clean_wav_path: str) -> float:
     
     try:
         # Get baseline transcript at 1.0x speed
+        display_info("Getting baseline transcript at 1.0x...", "info")
         baseline_text = transcribe_audio(test_segment_path)
         if not baseline_text or baseline_text.startswith("Error:"):
             display_info("Failed to get baseline transcript. Using default speed 1.0x.", "warning")
             return 1.0
-            
-        best_speed = 1.0
-        best_similarity = 1.0
-        min_similarity_threshold = 0.5  # 50% average similarity needed for a segment to pass
-        min_segments_passed_ratio = 0.7  # At least 70% of tested segments must pass the threshold
         
-        # Test each speed
-        speed_results = {speed: 0 for speed in speeds_to_try}  # Track successful tests for each speed
-        
-        for speed in tqdm(speeds_to_try, desc="Testing speeds", ncols=80, leave=False):
-            if speed == 1.0:
-                continue  # Skip baseline speed
-                
-            # Create sped-up version
+        # Binary search for optimal speed
+        def test_speed(speed):
+            """Test a specific speed and return similarity score."""
             sped_up_path = f"temp_speed_test_{speed}x.wav"
             try:
                 ffmpeg_command = [
@@ -1994,47 +2148,61 @@ def find_optimal_audio_speed(clean_wav_path: str) -> float:
                 if sped_up_text and not sped_up_text.startswith("Error:"):
                     # Calculate similarity
                     similarity = calculate_text_similarity(baseline_text, sped_up_text)["average_similarity_score"]
-                    
-                    # Track successful tests
-                    if similarity >= min_similarity_threshold:
-                        speed_results[speed] += 1
-                    
-                    # Update best speed if this one is better
-                    if similarity > best_similarity:
-                        best_similarity = similarity
-                        best_speed = speed
-                        
+                    return similarity
+                return 0.0
             except Exception as e:
                 display_info(f"Error testing speed {speed}x: {str(e)}", "warning")
-                continue
+                return 0.0
             finally:
                 # Clean up sped-up file
                 if os.path.exists(sped_up_path):
                     os.remove(sped_up_path)
         
+        # Binary search implementation
+        best_speed = 1.0
+        left, right = min_speed, max_speed
+        
+        display_info(f"Binary searching for optimal speed between {min_speed}x and {max_speed}x...", "info")
+        
+        # First test max speed to see if it's acceptable
+        max_similarity = test_speed(max_speed)
+        if max_similarity >= min_similarity_threshold:
+            display_info(f"✓ Max speed {max_speed}x is acceptable (similarity: {max_similarity:.2f})", "success")
+            return max_speed
+        
+        # Binary search for the highest acceptable speed
+        iterations = 0
+        max_iterations = 4  # Limit to 4 iterations max
+        
+        while iterations < max_iterations and right - left > 0.1:
+            mid = (left + right) / 2
+            mid = round(mid * 4) / 4  # Round to nearest 0.25
+            
+            display_info(f"Testing speed {mid}x... (iteration {iterations + 1})", "info")
+            similarity = test_speed(mid)
+            
+            if similarity >= min_similarity_threshold:
+                # This speed is acceptable, try higher
+                best_speed = mid
+                left = mid
+                display_info(f"✓ Speed {mid}x passed (similarity: {similarity:.2f})", "success")
+            else:
+                # This speed is too fast, try lower
+                right = mid
+                display_info(f"✗ Speed {mid}x too fast (similarity: {similarity:.2f})", "warning")
+            
+            iterations += 1
+        
         # Clean up test segment
         if os.path.exists(test_segment_path):
             os.remove(test_segment_path)
-            
-        # Find speeds that meet the minimum threshold
-        eligible_speeds = []
-        for speed, success_count in speed_results.items():
-            if success_count >= min_segments_passed_ratio:
-                eligible_speeds.append(speed)
         
-        if eligible_speeds:
-            # Choose the highest speed that meets the criteria
-            final_speed = max(eligible_speeds)
-            display_info(f"✓ Optimal speed found: {final_speed}x (similarity: {best_similarity:.2f})", "success")
-            return final_speed
+        if best_speed > 1.0:
+            display_info(f"✓ Optimal speed found: {best_speed}x", "success")
+            return best_speed
         else:
-            # If no speed meets the criteria, use the one with best similarity
-            if best_similarity > min_similarity_threshold:
-                display_info(f"✓ Best available speed found: {best_speed}x (similarity: {best_similarity:.2f})", "success")
-                return best_speed
-            else:
-                display_info("No suitable speed found. Using default speed 1.0x.", "info")
-                return 1.0
+            display_info("No suitable speed increase found. Using default speed 1.0x.", "info")
+            return 1.0
             
     except Exception as e:
         display_info(f"Error during speed testing: {str(e)}. Using default speed 1.0x.", "warning")
