@@ -1,13 +1,30 @@
-# Disable safetensors auto-conversion thread (causes 403 errors for some models)
-import transformers.safetensors_conversion
-transformers.safetensors_conversion.auto_conversion = lambda *args, **kwargs: None
+import os
+import sys
+
+# --- CRITICAL: HuggingFace & Transformers Protection ---
+# Must be set before any transformers/huggingface_hub imports
+os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+os.environ['HF_HUB_DISABLE_IMPLICIT_TOKEN'] = '1'
+os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
+
+# Low-level monkeypatching to prevent background thread crashes (HTTP 403)
+try:
+    import huggingface_hub.hf_api
+    # Disable discussion fetching globally (this is what triggers 403)
+    huggingface_hub.hf_api.get_repo_discussions = lambda *args, **kwargs: []
+    
+    import transformers.safetensors_conversion
+    # Disable the auto-conversion thread entirely
+    transformers.safetensors_conversion.auto_conversion = lambda *args, **kwargs: None
+except:
+    pass
+# -------------------------------------------------------
 
 from transformers import pipeline
-import os
 from pydub import AudioSegment
 from pydub.utils import make_chunks
 import torch
-import sys
 import subprocess
 import gc
 from typing import List, Dict
@@ -27,9 +44,7 @@ import time
 import argparse
 from scipy import signal
 
-# Disable HuggingFace auto-conversion to prevent 403 errors on model discussions
-os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
-os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+
 
 # Load environment variables
 load_dotenv()
@@ -333,7 +348,6 @@ def load_transcriber_for_language(language: str, device: str = None, force_model
             model=model_name,
             device=device,
             return_timestamps=True,
-            framework="pt",
             torch_dtype=torch.float16 if device == "cuda" else torch.float32,
             model_kwargs={"use_cache": True}
         )
@@ -1665,7 +1679,7 @@ def get_gemini_model():
         }
         
         _gemini_model = genai.GenerativeModel(
-            model_name='gemini-2.5-flash-preview-05-20',
+            model_name='gemini-1.5-flash',
             generation_config=generation_config
         )
     return _gemini_model
