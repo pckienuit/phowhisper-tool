@@ -639,6 +639,11 @@ class TranscriptionApp:
             self.progress_bar.start()
             self.update_progress(f"Processing URL: {url}")
             
+            # Check and update cookies right away before anything else
+            self.update_progress("Checking and preparing cookies...")
+            from phowhisper import update_cookies_from_raw
+            update_cookies_from_raw()
+            
             # Convert URL if needed
             youtube_url = convert_youtube_url(url)
             self.update_progress(f"Converted URL: {youtube_url}")

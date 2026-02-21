@@ -1861,6 +1861,24 @@ def _convert_json_cookies(json_path: str, output_path: str) -> None:
     
     display_info(f"Converted {len(cookies)} cookies", "info")
 
+def update_cookies_from_raw():
+    """Convert cookies_raw.json to cookies.txt immediately using external script."""
+    cookies_json = "cookies_raw.json"
+    cookies_txt = "cookies.txt"
+    if os.path.exists(cookies_json):
+        display_info(f"Found {cookies_json}, preparing cookies before processing...", "info")
+        try:
+            import subprocess, sys
+            subprocess.run([sys.executable, 'convert_cookies.py', cookies_json, cookies_txt], check=True, capture_output=True)
+            display_info("cookies.txt successfully generated using convert_cookies.py", "success")
+        except Exception as e:
+            display_info(f"External script failed: {e}. Using internal fallback...", "warning")
+            try:
+                _convert_json_cookies(cookies_json, cookies_txt)
+                display_info("cookies.txt generated using internal fallback", "success")
+            except Exception as inner_e:
+                display_info(f"Fallback also failed: {inner_e}", "error")
+
 
 def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio", cookies_browser: str = None) -> str:
     """
@@ -1954,20 +1972,8 @@ def download_youtube_audio_ytdlp(url: str, output_folder: str = "audio", cookies
                 except:
                     pass
         
-        # 2. Auto-convert cookies_raw.json if it's newer than cookies.txt
+        # Use pre-generated cookies.txt if it exists
         cookies_file = "cookies.txt"
-        cookies_json = "cookies_raw.json"
-        if os.path.exists(cookies_json):
-            json_mtime = os.path.getmtime(cookies_json)
-            txt_mtime = os.path.getmtime(cookies_file) if os.path.exists(cookies_file) else 0
-            if json_mtime > txt_mtime:
-                display_info("Found newer cookies_raw.json, converting to cookies.txt...", "info")
-                try:
-                    _convert_json_cookies(cookies_json, cookies_file)
-                    display_info("cookies.txt updated from cookies_raw.json", "success")
-                except Exception as e:
-                    display_info(f"Failed to convert cookies_raw.json: {e}", "warning")
-        
         if os.path.exists(cookies_file):
             auth_strategies.append(('cookies.txt file', {'cookiefile': cookies_file}))
         
@@ -2989,6 +2995,9 @@ if __name__ == "__main__":
     # Create necessary folders
     os.makedirs(output_folder, exist_ok=True)
     os.makedirs(audio_folder, exist_ok=True)
+    
+    # Check and convert cookies immediately before loading models
+    update_cookies_from_raw()
     
     # Optimize system resources
     optimize_memory_usage()
